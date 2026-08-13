@@ -1,14 +1,14 @@
 # ============================================================
 # Script Name:   u40Tech.ps1
 # Repository:    JJenkins0115/u40Tech
-# Description:   Integrated Graphical Shell & PowerShell Terminal Host
+# Description:   GitHub-Native Remote GUI Shell & Tool Runner
 # Compatibility: PowerShell 5.1+, VS Code Terminal Host, Windows 10/11
 # ============================================================
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 
-# Force TLS 1.2 for secure GitHub communications on older PowerShell hosts
+# Enforce TLS 1.2 protocol for secure GitHub communications
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Clear residual runspace variables
@@ -34,54 +34,80 @@ if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 # ------------------------------------------------------------
-# 1. TOOL DISCOVERY & REMOTE SYNC ENGINE (IRM / LOCAL SAFE)
+# 1. GITHUB REPOSITORY DISCOVERY & CACHE ENGINE
 # ------------------------------------------------------------
 
-# Determine execution context (Local vs. IRM Remote Memory)
-$IsLocalScript = $false
-$ScriptRoot    = $null
+# Define remote repository parameters
+$RepoOwner  = "JJenkins0115"
+$RepoName   = "u40Tech"
+$RepoBranch = "main"
 
-if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot) -and (Test-Path -Path $PSScriptRoot)) {
-    $ScriptRoot    = $PSScriptRoot
-    $IsLocalScript = $true
-}
-elseif ($MyInvocation.MyCommand.Path -and (Test-Path -Path $MyInvocation.MyCommand.Path)) {
-    $ScriptRoot    = Split-Path -Parent -Path $MyInvocation.MyCommand.Path
-    $IsLocalScript = $true
-}
-
-if (-not $IsLocalScript) {
-    # Executed via IRM / IEX in memory - fallback to local temp workspace
-    $ScriptRoot = Join-Path -Path $env:TEMP -ChildPath "U40Tech"
-}
-
-$ToolsDirectory = Join-Path -Path $ScriptRoot -ChildPath "Tools"
+# Establish local runtime cache directory inside $env:TEMP
+$WorkspaceRoot = Join-Path -Path $env:TEMP -ChildPath "U40Tech"
+$ToolsDirectory = Join-Path -Path $WorkspaceRoot -ChildPath "Tools"
 
 if (-not (Test-Path -Path $ToolsDirectory)) {
     New-Item -ItemType Directory -Path $ToolsDirectory -Force | Out-Null
 }
 
-# Function to auto-download repository sub-scripts if launched remotely via IRM
-function Sync-RemoteTools {
+function Sync-GitHubRepositoryTools {
     param(
-        [string]$TargetDir
+        [string]$Owner,
+        [string]$Repo,
+        [string]$Branch,
+        [string]$LocalTargetDir
     )
-    
-    Write-Host "[>] Remote IRM execution detected. Syncing toolkit scripts from GitHub..." -ForegroundColor Cyan
 
-    $BaseRawUrl = "https://raw.githubusercontent.com/JJenkins0115/u40Tech/main/Tools"
-    $ToolFiles  = @("ChangeName.ps1", "SystemDiagnostics.ps1", "NetFix.ps1")
+    Write-Host "[>] Interrogating GitHub Repository API ($Owner/$Repo)..." -ForegroundColor Cyan
 
-    foreach ($File in $ToolFiles) {
-        $Destination = Join-Path -Path $TargetDir -ChildPath $File
-        $FileUrl     = "$BaseRawUrl/$File"
+    $ApiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/Tools?ref=$Branch"
+    $UserAgent = "U40Tech-PowerShell-Host"
 
-        try {
-            Invoke-RestMethod -Uri $FileUrl -OutFile $Destination -ErrorAction Stop
-            Write-Host "    [+] Downloaded: $File" -ForegroundColor Green
+    try {
+        # Query remote directory manifest via GitHub REST API
+        $Response = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = $UserAgent } -Method Get -ErrorAction Stop
+        
+        # Filter response for PowerShell script assets
+        $ScriptFiles = $Response | Where-Object { $_.type -eq "file" -and $_.name -like "*.ps1" }
+
+        if (-not $ScriptFiles -or $ScriptFiles.Count -eq 0) {
+            Write-Host "    [!] No script objects returned by API manifest." -ForegroundColor Yellow
+            return
         }
-        catch {
-            Write-Host "    [-] Failed to sync $File from repository." -ForegroundColor Red
+
+        foreach ($FileObj in $ScriptFiles) {
+            $DownloadUrl = $FileObj.download_url
+            $FileName    = $FileObj.name
+            $Destination = Join-Path -Path $LocalTargetDir -ChildPath $FileName
+
+            Write-Host "    [>] Fetching: $FileName" -ForegroundColor Gray
+            Invoke-RestMethod -Uri $DownloadUrl -OutFile $Destination -ErrorAction Stop
+            
+            # Remove Zone.Identifier tracking streams to allow seamless execution
+            Unblock-File -Path $Destination -ErrorAction SilentlyContinue
+            Write-Host "    [+] Cached: $FileName" -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-Host "    [-] GitHub API call failed ($($_.Exception.Message))." -ForegroundColor Red
+        Write-Host "    [>] Falling back to direct raw file downloads..." -ForegroundColor Yellow
+
+        # Fallback file array in the event of API rate-limiting or network blockades
+        $FallbackFiles = @("ChangeName.ps1", "SystemDiagnostics.ps1", "NetFix.ps1", "UserAccountAudit.ps1")
+        $RawBaseUrl    = "https://raw.githubusercontent.com/$Owner/$Repo/$Branch/Tools"
+
+        foreach ($FileName in $FallbackFiles) {
+            $FileUrl     = "$RawBaseUrl/$FileName"
+            $Destination = Join-Path -Path $LocalTargetDir -ChildPath $FileName
+
+            try {
+                Invoke-RestMethod -Uri $FileUrl -OutFile $Destination -ErrorAction Stop
+                Unblock-File -Path $Destination -ErrorAction SilentlyContinue
+                Write-Host "    [+] Fallback Sync Succeeded: $FileName" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "    [-] Unable to resolve $FileName from remote source." -ForegroundColor Red
+            }
         }
     }
 }
@@ -90,7 +116,7 @@ function Sync-RemoteTools {
 # 2. UNIFIED UI AND TERMINAL WINDOW FORM
 # ------------------------------------------------------------
 $MainForm = New-Object System.Windows.Forms.Form
-$MainForm.Text = "U40Tech - IT Admin Unified Console Host"
+$MainForm.Text = "U40Tech - GitHub Unified Administration Console"
 $MainForm.Size = New-Object System.Drawing.Size(1024, 680)
 $MainForm.StartPosition = "CenterScreen"
 $MainForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
@@ -106,7 +132,7 @@ $MainForm.Controls.Add($SplitPanel)
 
 # Left Panel: Sidebar Header
 $SidebarLabel = New-Object System.Windows.Forms.Label
-$SidebarLabel.Text = "U40TECH TOOLKIT"
+$SidebarLabel.Text = "GITHUB REPO TOOLS"
 $SidebarLabel.Dock = "Top"
 $SidebarLabel.Height = 35
 $SidebarLabel.TextAlign = "MiddleCenter"
@@ -253,32 +279,31 @@ function Invoke-SelectedScript {
 }
 
 # ------------------------------------------------------------
-# 4. EVENT BINDINGS & FORM INITIALIZATION
+# 4. EVENT BINDINGS & INITIALIZATION
 # ------------------------------------------------------------
 $RunButton.Add_Click({ Invoke-SelectedScript })
 $ClearButton.Add_Click({ $TerminalOutput.Clear() })
 $ToolListBox.Add_DoubleClick({ Invoke-SelectedScript })
 
 $MainForm.Add_Load({
-    Append-TerminalText "[+] U40Tech Host Engine Initialized." ([System.Drawing.Color]::LightGreen)
+    Append-TerminalText "[+] U40Tech GitHub Host Engine Initialized." ([System.Drawing.Color]::LightGreen)
 
-    if (-not $IsLocalScript) {
-        Sync-RemoteTools -TargetDir $ToolsDirectory
-    }
+    # Perform dynamic sync with remote GitHub repository
+    Sync-GitHubRepositoryTools -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -LocalTargetDir $ToolsDirectory
 
-    Append-TerminalText "[>] Local Tools Directory: $ToolsDirectory" ([System.Drawing.Color]::Gray)
+    Append-TerminalText "[>] Local Tools Workspace: $ToolsDirectory" ([System.Drawing.Color]::Gray)
 
     $ToolsList = Get-ChildItem -Path $ToolsDirectory -Filter "*.ps1" -ErrorAction SilentlyContinue
     if (-not $ToolsList -or $ToolsList.Count -eq 0) {
-        Append-TerminalText "[!] No .ps1 scripts discovered in 'Tools' directory." ([System.Drawing.Color]::Yellow)
+        Append-TerminalText "[!] No .ps1 scripts found in local workspace." ([System.Drawing.Color]::Yellow)
     }
     else {
         foreach ($Tool in $ToolsList) {
             [void]$ToolListBox.Items.Add($Tool)
         }
-        Append-TerminalText "[+] Loaded $($ToolsList.Count) script(s) into U40Tech." ([System.Drawing.Color]::LightGreen)
+        Append-TerminalText "[+] Successfully loaded $($ToolsList.Count) repository script(s)." ([System.Drawing.Color]::LightGreen)
     }
 })
 
-# Display Application
+# Display Application Host
 [void]$MainForm.ShowDialog()
