@@ -1,14 +1,14 @@
 # ============================================================
 # Script Name:   u40Tech.ps1
 # Repository:    JJenkins0115/u40Tech
-# Description:   GitHub-Native Remote GUI Shell & Administrative Suite with Execution Logging
+# Description:   GUI Administrative Suite with Persistent u40TechLog
 # Compatibility: PowerShell 5.1+, VS Code Terminal Host, Windows 10/11
 # ============================================================
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 
-# Enforce TLS 1.2 protocol for secure remote communications
+# Enforce TLS 1.2 protocol for secure remote package and API interactions
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Clear residual runspace variables
@@ -34,18 +34,26 @@ if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 # ------------------------------------------------------------
-# 1. ENVIRONMENT & STATE TRACKING CONFIGURATION
+# 1. ENVIRONMENT & PERSISTENT LOG DIRECTORY CONFIGURATION
 # ------------------------------------------------------------
 $RepoOwner  = "JJenkins0115"
 $RepoName   = "u40Tech"
 $RepoBranch = "main"
 
+# Ephemeral directory for downloaded script execution
 $WorkspaceRoot  = Join-Path -Path $env:TEMP -ChildPath "U40Tech"
 $ToolsDirectory = Join-Path -Path $WorkspaceRoot -ChildPath "Tools"
-$HistoryFile    = Join-Path -Path $WorkspaceRoot -ChildPath "script_history.json"
 
+# Dedicated persistent directory for execution logs (survives UI purge)
+$PersistentLogDir = Join-Path -Path $env:TEMP -ChildPath "u40TechLog"
+$HistoryFile      = Join-Path -Path $PersistentLogDir -ChildPath "script_history.json"
+
+# Ensure directories exist
 if (-not (Test-Path -Path $ToolsDirectory)) {
     New-Item -ItemType Directory -Path $ToolsDirectory -Force | Out-Null
+}
+if (-not (Test-Path -Path $PersistentLogDir)) {
+    New-Item -ItemType Directory -Path $PersistentLogDir -Force | Out-Null
 }
 
 # System Identity Inspection
@@ -83,13 +91,17 @@ function Set-ScriptLastRunTimestamp {
         [datetime]$Timestamp = (Get-Date)
     )
 
-    # Retry loop to gracefully handle concurrent file writes
+    # Retry loop to handle temporary file access locks during rapid I/O
     $MaxRetries = 3
     $RetryCount = 0
     $Written    = $false
 
     while (-not $Written -and $RetryCount -lt $MaxRetries) {
         try {
+            if (-not (Test-Path -Path $PersistentLogDir)) {
+                New-Item -ItemType Directory -Path $PersistentLogDir -Force | Out-Null
+            }
+
             $HistoryMap = Get-ScriptHistoryMap
             $HistoryMap[$ScriptName] = $Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
             
@@ -112,7 +124,7 @@ function Sync-GitHubRepositoryTools {
         [string]$LocalTargetDir
     )
 
-    Write-Host "[>] Interrogating GitHub Repository API ($Owner/$Repo)..." -ForegroundColor Cyan
+    Write-Host "[>] Querying GitHub Repository API ($Owner/$Repo)..." -ForegroundColor Cyan
 
     $ApiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/Tools?ref=$Branch"
     $UserAgent = "U40Tech-PowerShell-Host"
@@ -175,7 +187,7 @@ $SubTitleLabel.Font = New-Object System.Drawing.Font("Consolas", 9)
 $SubTitleLabel.ForeColor = [System.Drawing.Color]::FromArgb(180, 180, 180)
 $HeaderPanel.Controls.Add($SubTitleLabel)
 
-# Top Right Action Buttons Header
+# Top Right Action Buttons
 $RefreshButton = New-Object System.Windows.Forms.Button
 $RefreshButton.Text = "Refresh Scripts"
 $RefreshButton.Size = New-Object System.Drawing.Size(130, 34)
@@ -206,9 +218,9 @@ $SplitPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 42)
 $MainForm.Controls.Add($SplitPanel)
 $SplitPanel.BringToFront()
 
-# Left Panel: Sidebar Header
+# Left Panel Header
 $SidebarLabel = New-Object System.Windows.Forms.Label
-$SidebarLabel.Text = "AVAILABLE TOOLS & RUN HISTORY"
+$SidebarLabel.Text = "AVAILABLE TOOLS & LAST RUN TIME"
 $SidebarLabel.Dock = "Top"
 $SidebarLabel.Height = 35
 $SidebarLabel.TextAlign = "MiddleCenter"
@@ -217,7 +229,7 @@ $SidebarLabel.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 200)
 $SidebarLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $SplitPanel.Panel1.Controls.Add($SidebarLabel)
 
-# Left Panel: Multi-Column ListView
+# Left Panel ListView
 $ToolListView = New-Object System.Windows.Forms.ListView
 $ToolListView.Dock = "Fill"
 $ToolListView.View = [System.Windows.Forms.View]::Details
@@ -234,7 +246,7 @@ $ToolListView.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickab
 $SplitPanel.Panel1.Controls.Add($ToolListView)
 $ToolListView.BringToFront()
 
-# Right Panel: Output Console Header
+# Right Panel Header
 $ConsoleLabel = New-Object System.Windows.Forms.Label
 $ConsoleLabel.Text = "EXECUTION OUTPUT TERMINAL"
 $ConsoleLabel.Dock = "Top"
@@ -246,7 +258,7 @@ $ConsoleLabel.ForeColor = [System.Drawing.Color]::FromArgb(0, 212, 255)
 $ConsoleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $SplitPanel.Panel2.Controls.Add($ConsoleLabel)
 
-# Right Panel: Output RichTextBox
+# Right Panel Terminal Output Box
 $TerminalOutput = New-Object System.Windows.Forms.RichTextBox
 $TerminalOutput.Dock = "Fill"
 $TerminalOutput.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 12)
@@ -257,7 +269,7 @@ $TerminalOutput.BorderStyle = "None"
 $SplitPanel.Panel2.Controls.Add($TerminalOutput)
 $TerminalOutput.BringToFront()
 
-# Bottom Control Action Bar
+# Bottom Action Panel
 $ActionPanel = New-Object System.Windows.Forms.Panel
 $ActionPanel.Dock = "Bottom"
 $ActionPanel.Height = 50
@@ -308,7 +320,7 @@ function Populate-ToolList {
     $HistoryMap = Get-ScriptHistoryMap
 
     if (-not $ToolsList) {
-        Append-TerminalText "[!] No .ps1 tools located in workspace directory." ([System.Drawing.Color]::Yellow)
+        Append-TerminalText "[!] No .ps1 tools found in workspace directory." ([System.Drawing.Color]::Yellow)
     }
     else {
         foreach ($Tool in $ToolsList) {
@@ -320,7 +332,7 @@ function Populate-ToolList {
 
             [void]$ToolListView.Items.Add($Item)
         }
-        Append-TerminalText "[+] Loaded $($ToolsList.Count) tool script(s) with historical timestamps." ([System.Drawing.Color]::LightGreen)
+        Append-TerminalText "[+] Loaded $($ToolsList.Count) tool script(s). Execution log directory: $PersistentLogDir" ([System.Drawing.Color]::LightGreen)
     }
 }
 
@@ -342,7 +354,7 @@ function Invoke-SelectedScript {
     $RefreshButton.Enabled = $false
     $ToolListView.Enabled  = $false
 
-    # Update Execution Log Timestamp
+    # Update Log Timestamp
     $ExecutionTime = Get-Date
     Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
     $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
@@ -386,7 +398,7 @@ function Invoke-SelectedScript {
         Start-Sleep -Milliseconds 100
     }
 
-    Append-TerminalText "[+] Tool execution finalized. Process Exit Code: $($Process.ExitCode)" ([System.Drawing.Color]::LightGreen)
+    Append-TerminalText "[+] Tool execution finalized. Exit Code: $($Process.ExitCode)" ([System.Drawing.Color]::LightGreen)
 
     $RunButton.Enabled     = $true
     $RefreshButton.Enabled = $true
@@ -394,21 +406,23 @@ function Invoke-SelectedScript {
 }
 
 function Exit-AndPurgeWorkspace {
-    Append-TerminalText "[>] Terminating child processes and purging workspace context..." ([System.Drawing.Color]::Yellow)
+    Append-TerminalText "[>] Terminating processes and purging temporary workspace context..." ([System.Drawing.Color]::Yellow)
 
     Get-Process -Name "Rapr" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
 
+    # Safely purge temporary workspace while preserving $env:TEMP\u40TechLog
     try {
         if (Test-Path -Path $WorkspaceRoot) {
             Remove-Item -Path $WorkspaceRoot -Recurse -Force -ErrorAction Stop
             Write-Host "[+] Temp workspace successfully purged: $WorkspaceRoot" -ForegroundColor Green
+            Write-Host "[+] Persistent log retained: $PersistentLogDir" -ForegroundColor Green
         }
     }
     catch {
-        Write-Host "[-] Warning: Failed to wipe temp directory ($($_.Exception.Message))" -ForegroundColor Red
+        Write-Host "[-] Warning: Failed to wipe temp workspace directory ($($_.Exception.Message))" -ForegroundColor Red
     }
 
     $MainForm.Close()
@@ -422,7 +436,7 @@ $ClearButton.Add_Click({ $TerminalOutput.Clear() })
 $ToolListView.Add_DoubleClick({ Invoke-SelectedScript })
 
 $RefreshButton.Add_Click({
-    Append-TerminalText "[>] Synchronizing script files from GitHub repository..." ([System.Drawing.Color]::Cyan)
+    Append-TerminalText "[>] Synchronizing script objects from GitHub repository..." ([System.Drawing.Color]::Cyan)
     Sync-GitHubRepositoryTools -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -LocalTargetDir $ToolsDirectory
     Populate-ToolList
 })
