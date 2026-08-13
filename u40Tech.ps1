@@ -40,20 +40,12 @@ $RepoOwner  = "JJenkins0115"
 $RepoName   = "u40Tech"
 $RepoBranch = "main"
 
-# Workspace directories
+# Workspace directory
 $WorkspaceRoot  = Join-Path -Path $env:TEMP -ChildPath "U40Tech"
 $ToolsDirectory = Join-Path -Path $WorkspaceRoot -ChildPath "Tools"
 
-# Persistent directory for execution logs
-$PersistentLogDir = Join-Path -Path $env:TEMP -ChildPath "u40TechLog"
-$HistoryFile      = Join-Path -Path $PersistentLogDir -ChildPath "script_history.json"
-
-# Initialize directories on startup
 if (-not (Test-Path -Path $ToolsDirectory)) {
     New-Item -ItemType Directory -Path $ToolsDirectory -Force | Out-Null
-}
-if (-not (Test-Path -Path $PersistentLogDir)) {
-    New-Item -ItemType Directory -Path $PersistentLogDir -Force | Out-Null
 }
 
 # System Identity Inspection
@@ -62,55 +54,7 @@ $ComputerName = $env:COMPUTERNAME
 $DomainName   = if ($CompInfo.PartOfDomain) { $CompInfo.Domain } else { "WORKGROUP ($($CompInfo.Domain))" }
 
 # ------------------------------------------------------------
-# 2. PERSISTENT EXECUTION LOGGING ENGINE
-# ------------------------------------------------------------
-function Get-ScriptHistoryMap {
-    if (-not (Test-Path -Path $HistoryFile)) { return @{} }
-
-    try {
-        $RawJson = Get-Content -Path $HistoryFile -Raw -ErrorAction Stop
-        if ([string]::IsNullOrWhiteSpace($RawJson)) { return @{} }
-
-        $JsonObject = $RawJson | ConvertFrom-Json -ErrorAction Stop
-        $HistoryMap = @{}
-
-        if ($null -ne $JsonObject) {
-            foreach ($Prop in $JsonObject.PSObject.Properties) {
-                $HistoryMap[$Prop.Name] = $Prop.Value
-            }
-        }
-        return $HistoryMap
-    }
-    catch {
-        return @{}
-    }
-}
-
-function Set-ScriptLastRunTimestamp {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ScriptName,
-        [datetime]$Timestamp = (Get-Date)
-    )
-
-    try {
-        if (-not (Test-Path -Path $PersistentLogDir)) {
-            New-Item -ItemType Directory -Path $PersistentLogDir -Force | Out-Null
-        }
-
-        $HistoryMap = Get-ScriptHistoryMap
-        $HistoryMap[$ScriptName] = $Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
-
-        $JsonOutput = $HistoryMap | ConvertTo-Json -Depth 2
-        Set-Content -Path $HistoryFile -Value $JsonOutput -Force -ErrorAction Stop
-    }
-    catch {
-        # Non-critical write failure suppression
-    }
-}
-
-# ------------------------------------------------------------
-# 3. GUI LAYOUT SYSTEM
+# 2. GUI LAYOUT SYSTEM
 # ------------------------------------------------------------
 $MainForm = New-Object System.Windows.Forms.Form
 $MainForm.Text = "U40Tech - Unified Systems Management Console"
@@ -196,8 +140,7 @@ $ToolListView.ForeColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
 $ToolListView.BorderStyle = "None"
 $ToolListView.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
 
-[void]$ToolListView.Columns.Add("Script Name", 230)
-[void]$ToolListView.Columns.Add("Last Executed", 160)
+[void]$ToolListView.Columns.Add("Script Name", 390)
 
 # ListView Groups
 $GroupInline   = New-Object System.Windows.Forms.ListViewGroup("Inline Tools (Main Terminal)", [System.Windows.Forms.HorizontalAlignment]::Left)
@@ -279,7 +222,7 @@ $ClearButton.Cursor = [System.Windows.Forms.Cursors]::Hand
 $ActionPanel.Controls.Add($ClearButton)
 
 # ------------------------------------------------------------
-# 4. HELPER & EXECUTION FUNCTIONS
+# 3. HELPER & EXECUTION FUNCTIONS
 # ------------------------------------------------------------
 function Append-TerminalText {
     [CmdletBinding()]
@@ -310,8 +253,7 @@ function Populate-ToolList {
     param()
 
     $ToolListView.Items.Clear()
-    $ToolsList  = Get-ChildItem -Path $ToolsDirectory -Filter "*.ps1" -ErrorAction SilentlyContinue
-    $HistoryMap = Get-ScriptHistoryMap
+    $ToolsList = Get-ChildItem -Path $ToolsDirectory -Filter "*.ps1" -ErrorAction SilentlyContinue
 
     if (-not $ToolsList) {
         Append-TerminalText -Message "[!] No .ps1 tools found in workspace directory." -Color ([System.Drawing.Color]::Yellow)
@@ -330,9 +272,6 @@ function Populate-ToolList {
         } else {
             $Item.Group = $ToolListView.Groups[0]
         }
-
-        $LastRun = if ($HistoryMap.ContainsKey($Tool.Name)) { $HistoryMap[$Tool.Name] } else { "Never" }
-        [void]$Item.SubItems.Add($LastRun)
 
         [void]$ToolListView.Items.Add($Item)
     }
@@ -353,10 +292,6 @@ function Invoke-SelectedScriptInline {
     Append-TerminalText -Message "[>] Executing Inline (Main Terminal): $ScriptName" -Color ([System.Drawing.Color]::FromArgb(0, 212, 255))
     Append-TerminalText -Message "============================================================" -Color ([System.Drawing.Color]::FromArgb(0, 212, 255))
 
-    $ExecutionTime = Get-Date
-    Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
-    $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
-
     $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
     $ProcessInfo.FileName = "powershell.exe"
     $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
@@ -369,7 +304,6 @@ function Invoke-SelectedScriptInline {
     $Process.StartInfo = $ProcessInfo
     $Process.EnableRaisingEvents = $true
 
-    # Event handlers for redirected process output
     $null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -Action {
         param($evtSender, $evtArgs)
         if ($null -ne $evtArgs -and -not [string]::IsNullOrWhiteSpace($evtArgs.Data)) {
@@ -405,10 +339,6 @@ function Invoke-SelectedScriptInSecondWindow {
     $ScriptPath   = $SelectedItem.Tag
 
     Append-TerminalText -Message "[>] Launching in dedicated process window: $ScriptName" -Color ([System.Drawing.Color]::MediumSpringGreen)
-
-    $ExecutionTime = Get-Date
-    Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
-    $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
 
     Start-Process powershell.exe -ArgumentList "-NoExit -ExecutionPolicy Bypass -File `"$ScriptPath`""
 }
@@ -541,7 +471,7 @@ function Exit-AndPurgeWorkspace {
 }
 
 # ------------------------------------------------------------
-# 5. EVENT BINDINGS
+# 4. EVENT BINDINGS
 # ------------------------------------------------------------
 $RunButton.Add_Click({ Invoke-SelectedScriptInline })
 $RunWindowButton.Add_Click({ Invoke-SelectedScriptInSecondWindow })
