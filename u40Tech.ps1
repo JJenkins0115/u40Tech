@@ -358,7 +358,8 @@ function Populate-ToolList {
 function Invoke-SelectedScriptInline {
     <#
     .SYNOPSIS
-        Executes child PowerShell processes asynchronously with strict-mode compliant event bindings.
+        Executes child PowerShell processes asynchronously inside a background Runspace.
+        Prevents WinForms UI thread starvation and engine event loop locking.
     #>
     [CmdletBinding()]
     param()
@@ -376,7 +377,7 @@ function Invoke-SelectedScriptInline {
     Append-TerminalText -Message "[>] Executing (Main Terminal): $ScriptName" -Color ([System.Drawing.Color]::FromArgb(0, 212, 255))
     Append-TerminalText -Message "============================================================" -Color ([System.Drawing.Color]::FromArgb(0, 212, 255))
 
-    # Disable controls during execution
+    # Disable controls while child process executes
     $RunButton.Enabled       = $false
     $RunWindowButton.Enabled = $false
     $RefreshButton.Enabled   = $false
@@ -387,64 +388,116 @@ function Invoke-SelectedScriptInline {
     Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
     $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
 
-    $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $ProcessInfo.FileName = "powershell.exe"
-    $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
-    $ProcessInfo.RedirectStandardOutput = $true
-    $ProcessInfo.RedirectStandardError  = $true
-    $ProcessInfo.UseShellExecute        = $false
-    $ProcessInfo.CreateNoWindow         = $true
+    # Background Script Block executed inside a clean PowerShell Runspace
+    $ScriptBlock = {
+        param($ScriptPath, $MainForm, $TerminalOutput)
 
-    $Process = New-Object System.Diagnostics.Process
-    $Process.StartInfo = $ProcessInfo
-    $Process.EnableRaisingEvents = $true
-
-    $SubOutId  = "Out_$(Get-Random)"
-    $SubErrId  = "Err_$(Get-Random)"
-    $SubExitId = "Exit_$(Get-Random)"
-
-    # Strict-mode compliant output event subscriber
-    $null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -SourceIdentifier $SubOutId -Action {
-        param($evtSender, $evtArgs)
-        if ($null -ne $evtArgs -and -not [string]::IsNullOrWhiteSpace($evtArgs.Data)) {
-            Append-TerminalText -Message $evtArgs.Data -Color ([System.Drawing.Color]::LightGray)
-        }
-    }
-
-    # Strict-mode compliant error event subscriber
-    $null = Register-ObjectEvent -InputObject $Process -EventName "ErrorDataReceived" -SourceIdentifier $SubErrId -Action {
-        param($evtSender, $evtArgs)
-        if ($null -ne $evtArgs -and -not [string]::IsNullOrWhiteSpace($evtArgs.Data)) {
-            Append-TerminalText -Message $evtArgs.Data -Color ([System.Drawing.Color]::Coral)
-        }
-    }
-
-    # Strict-mode compliant completion subscriber
-    $null = Register-ObjectEvent -InputObject $Process -EventName "Exited" -SourceIdentifier $SubExitId -Action {
-        param($evtSender, $evtArgs)
-        try {
-            $ExitCode = 0
-            if ($null -ne $evtSender) { $ExitCode = $evtSender.ExitCode }
-            Append-TerminalText -Message "[+] Tool execution finalized. Process Exit Code: $ExitCode" -Color ([System.Drawing.Color]::LightGreen)
-        }
-        finally {
-            # Guaranteed UI control restoration
+        # Helper function to pipe log lines safely back to GUI RichTextBox
+        function Send-UIOutput {
+            param([string]$Text, [string]$HexColor)
             if ($null -ne $MainForm -and -not $MainForm.IsDisposed -and $MainForm.IsHandleCreated) {
                 $null = $MainForm.BeginInvoke([Action]{
-                    $RunButton.Enabled       = $true
-                    $RunWindowButton.Enabled = $true
-                    $RefreshButton.Enabled   = $true
-                    $ToolListView.Enabled    = $true
+                    try {
+                        $TerminalOutput.SelectionStart = $TerminalOutput.TextLength
+                        $TerminalOutput.SelectionLength = 0
+                        $TerminalOutput.SelectionColor = [System.Drawing.ColorTranslator]::FromHtml($HexColor)
+                        $TerminalOutput.AppendText("$Text`r`n")
+                        $TerminalOutput.ScrollToCaret()
+                    } catch {}
                 })
             }
-            # Clean up event subscribers to prevent host memory leak
-            Unregister-Event -SourceIdentifier $EventSubscriber.SourceIdentifier -ErrorAction SilentlyContinue
+        }
+
+        try {
+            $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $ProcessInfo.FileName = "powershell.exe"
+            $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+            $ProcessInfo.RedirectStandardOutput = $true
+            $ProcessInfo.RedirectStandardError  = $true
+            $ProcessInfo.UseShellExecute        = $false
+            $ProcessInfo.CreateNoWindow         = $true
+
+            $Process = New-Object System.Diagnostics.Process
+            $Process.StartInfo = $ProcessInfo
+
+            # Asynchronous Event Subscriptions inside background thread
+            $Process.add_OutputDataReceived({
+                param($sender, $e)
+                if ($null -ne $e -and -not [string]::IsNullOrWhiteSpace($e.Data)) {
+                    Send-UIOutput -Text $e.Data -HexColor "#D2D2D2"
+                }
+            })
+
+            $Process.add_ErrorDataReceived({
+                param($sender, $e)
+                if ($null -ne $e -and -not [string]::IsNullOrWhiteSpace($e.Data)) {
+                    Send-UIOutput -Text $e.Data -HexColor "#FF7F50"
+                }
+            })
+
+            [void]$Process.Start()
+            $Process.BeginOutputReadLine()
+            $Process.BeginErrorReadLine()
+            $Process.WaitForExit()
+
+            $ExitCode = $Process.ExitCode
+            Send-UIOutput -Text "[+] Tool execution finalized. Process Exit Code: $ExitCode" -HexColor "#90EE90"
+        }
+        catch {
+            Send-UIOutput -Text "[-] Process execution failure: $($_.Exception.Message)" -HexColor "#FF6347"
         }
     }
 
-    [void]$Process.Start()
-    $Process.BeginOutputReadLine()
-    $Process.BeginErrorReadLine()
+    # Initialize non-blocking background Runspace
+    $PowerShell = [powershell]::Create()
+    $null = $PowerShell.AddScript($ScriptBlock)
+    $null = $PowerShell.AddArgument($ScriptPath)
+    $null = $PowerShell.AddArgument($MainForm)
+    $null = $PowerShell.AddArgument($TerminalOutput)
+
+    $AsyncResult = $PowerShell.BeginInvoke()
+
+    # GUI Timer to monitor completion and re-enable controls without blocking thread
+    $Timer = New-Object System.Windows.Forms.Timer
+    $Timer.Interval = 100
+    $Timer.Tag = @{
+        PowerShell      = $PowerShell
+        AsyncResult     = $AsyncResult
+        RunButton       = $RunButton
+        RunWindowButton = $RunWindowButton
+        RefreshButton   = $RefreshButton
+        ToolListView    = $ToolListView
+    }
+
+    $Timer.Add_Tick({
+        param($sender, $e)
+
+        $TimerObj = [System.Windows.Forms.Timer]$sender
+        $State    = [hashtable]$TimerObj.Tag
+
+        if ($State.AsyncResult.IsCompleted) {
+            $TimerObj.Stop()
+            $TimerObj.Dispose()
+
+            try {
+                $null = $State.PowerShell.EndInvoke($State.AsyncResult)
+            }
+            catch {}
+            finally {
+                $State.PowerShell.Dispose()
+
+                # Restore GUI Control Interactive Status
+                if ($null -ne $MainForm -and -not $MainForm.IsDisposed) {
+                    $State.RunButton.Enabled       = $true
+                    $State.RunWindowButton.Enabled = $true
+                    $State.RefreshButton.Enabled   = $true
+                    $State.ToolListView.Enabled    = $true
+                }
+            }
+        }
+    })
+
+    $Timer.Start()
 }
 
 function Invoke-SelectedScriptInSecondWindow {
@@ -493,13 +546,15 @@ function Sync-GitHubRepositoryToolsAsync {
 
         function Report-Progress {
             param([string]$Msg, [string]$ColorHex = "#D2D2D2")
-            if ($null -ne $MainForm -and -not $MainForm.IsDisposed) {
+            if ($null -ne $MainForm -and -not $MainForm.IsDisposed -and $MainForm.IsHandleCreated) {
                 $null = $MainForm.BeginInvoke([Action]{
-                    $TerminalControl.SelectionStart = $TerminalControl.TextLength
-                    $TerminalControl.SelectionLength = 0
-                    $TerminalControl.SelectionColor = [System.Drawing.ColorTranslator]::FromHtml($ColorHex)
-                    $TerminalControl.AppendText("$Msg`r`n")
-                    $TerminalControl.ScrollToCaret()
+                    try {
+                        $TerminalControl.SelectionStart = $TerminalControl.TextLength
+                        $TerminalControl.SelectionLength = 0
+                        $TerminalControl.SelectionColor = [System.Drawing.ColorTranslator]::FromHtml($ColorHex)
+                        $TerminalControl.AppendText("$Msg`r`n")
+                        $TerminalControl.ScrollToCaret()
+                    } catch {}
                 })
             }
         }
@@ -522,7 +577,7 @@ function Sync-GitHubRepositoryToolsAsync {
         }
     }
 
-    # Background runspace invocation
+    # Background Runspace
     $PowerShell = [powershell]::Create()
     $null = $PowerShell.AddScript($ScriptBlock)
     $null = $PowerShell.AddArgument($Owner)
@@ -534,7 +589,7 @@ function Sync-GitHubRepositoryToolsAsync {
 
     $AsyncResultHandle = $PowerShell.BeginInvoke()
 
-    # Polling timer for thread synchronization
+    # Timer Polling
     $Timer = New-Object System.Windows.Forms.Timer
     $Timer.Interval = 200
     $Timer.Tag = @{
@@ -559,15 +614,16 @@ function Sync-GitHubRepositoryToolsAsync {
                 $null = $State.PowerShell.EndInvoke($State.AsyncResult)
             }
             catch {
-                Append-TerminalText -Message "[-] Runspace error: $($_.Exception.Message)" -Color ([System.Drawing.Color]::Red)
+                Append-TerminalText -Message "[-] Runspace sync error: $($_.Exception.Message)" -Color ([System.Drawing.Color]::Red)
             }
             finally {
                 $State.PowerShell.Dispose()
 
-                # Restore UI control status
-                $State.RefreshButton.Enabled   = $true
-                $State.RunButton.Enabled       = $true
-                $State.RunWindowButton.Enabled = $true
+                if ($null -ne $MainForm -and -not $MainForm.IsDisposed) {
+                    $State.RefreshButton.Enabled   = $true
+                    $State.RunButton.Enabled       = $true
+                    $State.RunWindowButton.Enabled = $true
+                }
 
                 Populate-ToolList
             }
