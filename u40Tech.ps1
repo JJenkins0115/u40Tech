@@ -1,13 +1,14 @@
 # ============================================================
 # Script Name:   u40Tech.ps1
-# Description:   Asynchronous GUI Console with Submenu & Second Window Support
-# Compatibility: PowerShell 5.1+, Visual Studio Code Terminal Host, Windows 10/11
+# Repository:    JJenkins0115/u40Tech
+# Description:   Asynchronous GUI Administrative Console
+# Environment:   PowerShell 5.1+, VS Code Terminal Host, Win 10/11
 # ============================================================
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 
-# Force TLS 1.2 protocol for secure remote script transfers
+# Force TLS 1.2 protocol for secure remote transfers
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Clear residual runspace variables
@@ -39,15 +40,15 @@ $RepoOwner  = "JJenkins0115"
 $RepoName   = "u40Tech"
 $RepoBranch = "main"
 
-# Ephemeral workspace directory (purged on exit)
+# Workspace directories
 $WorkspaceRoot  = Join-Path -Path $env:TEMP -ChildPath "U40Tech"
 $ToolsDirectory = Join-Path -Path $WorkspaceRoot -ChildPath "Tools"
 
-# Dedicated persistent directory for execution logs (survives exit & purge)
+# Persistent directory for execution logs
 $PersistentLogDir = Join-Path -Path $env:TEMP -ChildPath "u40TechLog"
 $HistoryFile      = Join-Path -Path $PersistentLogDir -ChildPath "script_history.json"
 
-# Initialize required directories on startup
+# Initialize directories on startup
 if (-not (Test-Path -Path $ToolsDirectory)) {
     New-Item -ItemType Directory -Path $ToolsDirectory -Force | Out-Null
 }
@@ -104,7 +105,7 @@ function Set-ScriptLastRunTimestamp {
         Set-Content -Path $HistoryFile -Value $JsonOutput -Force -ErrorAction Stop
     }
     catch {
-        # Non-critical failure write suppression
+        # Non-critical write failure suppression
     }
 }
 
@@ -184,7 +185,7 @@ $SidebarLabel.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 200)
 $SidebarLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $SplitPanel.Panel1.Controls.Add($SidebarLabel)
 
-# Left Panel ListView (Categorized)
+# Left Panel ListView
 $ToolListView = New-Object System.Windows.Forms.ListView
 $ToolListView.Dock = "Fill"
 $ToolListView.View = [System.Windows.Forms.View]::Details
@@ -198,8 +199,8 @@ $ToolListView.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickab
 [void]$ToolListView.Columns.Add("Script Name", 230)
 [void]$ToolListView.Columns.Add("Last Executed", 160)
 
-# Configure ListView Groups for Categories
-$GroupInline = New-Object System.Windows.Forms.ListViewGroup("Inline Tools (Main Terminal)", [System.Windows.Forms.HorizontalAlignment]::Left)
+# ListView Groups
+$GroupInline   = New-Object System.Windows.Forms.ListViewGroup("Inline Tools (Main Terminal)", [System.Windows.Forms.HorizontalAlignment]::Left)
 $GroupExternal = New-Object System.Windows.Forms.ListViewGroup("Second Window Tools (Standalone)", [System.Windows.Forms.HorizontalAlignment]::Left)
 [void]$ToolListView.Groups.Add($GroupInline)
 [void]$ToolListView.Groups.Add($GroupExternal)
@@ -207,7 +208,7 @@ $GroupExternal = New-Object System.Windows.Forms.ListViewGroup("Second Window To
 $SplitPanel.Panel1.Controls.Add($ToolListView)
 $ToolListView.BringToFront()
 
-# --- RIGHT-CLICK CONTEXT SUBMENU ---
+# Context Submenu
 $ContextMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $MenuItemRunInline = $ContextMenu.Items.Add("Run in Main Terminal (Inline)")
 $MenuItemRunWindow = $ContextMenu.Items.Add("Launch in Second Window")
@@ -321,14 +322,13 @@ function Populate-ToolList {
         $Item = New-Object System.Windows.Forms.ListViewItem($Tool.Name)
         $Item.Tag = $Tool.FullName
 
-        # Read top lines of script to check for # ExecutionMode: SecondWindow metadata tag
         $FirstLines = Get-Content -Path $Tool.FullName -TotalCount 5 -ErrorAction SilentlyContinue
         $IsSecondWindowMode = $FirstLines | Where-Object { $_ -like "*ExecutionMode:*SecondWindow*" }
 
         if ($IsSecondWindowMode) {
-            $Item.Group = $ToolListView.Groups[1] # Second Window Group
+            $Item.Group = $ToolListView.Groups[1]
         } else {
-            $Item.Group = $ToolListView.Groups[0] # Inline Group
+            $Item.Group = $ToolListView.Groups[0]
         }
 
         $LastRun = if ($HistoryMap.ContainsKey($Tool.Name)) { $HistoryMap[$Tool.Name] } else { "Never" }
@@ -336,14 +336,10 @@ function Populate-ToolList {
 
         [void]$ToolListView.Items.Add($Item)
     }
-    Append-TerminalText -Message "[+] Loaded $($ToolsList.Count) tool script(s) across standard & dynamic categories." -Color ([System.Drawing.Color]::LightGreen)
+    Append-TerminalText -Message "[+] Loaded $($ToolsList.Count) tool script(s) across categories." -Color ([System.Drawing.Color]::LightGreen)
 }
 
 function Invoke-SelectedScriptInline {
-    <#
-    .SYNOPSIS
-        Executes the selected script and redirects output directly to the main RichTextBox.
-    #>
     if ($ToolListView.SelectedItems.Count -eq 0) {
         Append-TerminalText -Message "[!] Select a tool script prior to execution." -Color ([System.Drawing.Color]::Orange)
         return
@@ -373,20 +369,24 @@ function Invoke-SelectedScriptInline {
     $Process.StartInfo = $ProcessInfo
     $Process.EnableRaisingEvents = $true
 
+    # Event handlers for redirected process output
     $null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -Action {
-        if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
-            Append-TerminalText -Message $Event.SourceEventArgs.Data -Color ([System.Drawing.Color]::LightGray)
+        param($evtSender, $evtArgs)
+        if ($null -ne $evtArgs -and -not [string]::IsNullOrWhiteSpace($evtArgs.Data)) {
+            Append-TerminalText -Message $evtArgs.Data -Color ([System.Drawing.Color]::LightGray)
         }
     }
 
     $null = Register-ObjectEvent -InputObject $Process -EventName "ErrorDataReceived" -Action {
-        if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
-            Append-TerminalText -Message $Event.SourceEventArgs.Data -Color ([System.Drawing.Color]::Coral)
+        param($evtSender, $evtArgs)
+        if ($null -ne $evtArgs -and -not [string]::IsNullOrWhiteSpace($evtArgs.Data)) {
+            Append-TerminalText -Message $evtArgs.Data -Color ([System.Drawing.Color]::Coral)
         }
     }
 
     $null = Register-ObjectEvent -InputObject $Process -EventName "Exited" -Action {
-        Append-TerminalText -Message "[+] Execution completed. Exit Code: $($Sender.ExitCode)" -Color ([System.Drawing.Color]::LightGreen)
+        param($evtSender, $evtArgs)
+        Append-TerminalText -Message "[+] Execution completed. Exit Code: $($evtSender.ExitCode)" -Color ([System.Drawing.Color]::LightGreen)
     }
 
     [void]$Process.Start()
@@ -395,10 +395,6 @@ function Invoke-SelectedScriptInline {
 }
 
 function Invoke-SelectedScriptInSecondWindow {
-    <#
-    .SYNOPSIS
-        Launches the selected script in a dedicated, external PowerShell process window.
-    #>
     if ($ToolListView.SelectedItems.Count -eq 0) {
         Append-TerminalText -Message "[!] Select a tool script prior to execution." -Color ([System.Drawing.Color]::Orange)
         return
@@ -414,18 +410,10 @@ function Invoke-SelectedScriptInSecondWindow {
     Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
     $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
 
-    # Spawns a dedicated PowerShell process window so interactive GUI tools or console prompts run cleanly
     Start-Process powershell.exe -ArgumentList "-NoExit -ExecutionPolicy Bypass -File `"$ScriptPath`""
 }
 
 function Sync-GitHubRepositoryToolsAsync {
-    <#
-    .SYNOPSIS
-        Asynchronously synchronizes tool scripts from GitHub without freezing the WinForms UI.
-    .DESCRIPTION
-        Uses PowerShell runspaces and a WinForms Timer. Execution state ($PowerShell, $AsyncResult, UI Controls)
-        is encapsulated within the $Timer.Tag dictionary to guarantee variable scope resolution under Set-StrictMode.
-    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -441,13 +429,11 @@ function Sync-GitHubRepositoryToolsAsync {
         [string]$LocalTargetDir
     )
 
-    # Disable control triggers to prevent concurrent execution during sync
     $RefreshButton.Enabled = $false
     $RunButton.Enabled     = $false
 
     Append-TerminalText -Message "[>] Initiating background repository sync..." -Color ([System.Drawing.Color]::Cyan)
 
-    # Isolated ScriptBlock executed within secondary runspace
     $ScriptBlock = {
         param($Owner, $Repo, $Branch, $LocalTargetDir, $MainForm, $TerminalControl)
 
@@ -482,7 +468,7 @@ function Sync-GitHubRepositoryToolsAsync {
         }
     }
 
-    # Construct runspace pipeline instance
+    # Create background PowerShell runspace
     $PowerShell = [powershell]::Create()
     $null = $PowerShell.AddScript($ScriptBlock)
     $null = $PowerShell.AddArgument($Owner)
@@ -492,15 +478,13 @@ function Sync-GitHubRepositoryToolsAsync {
     $null = $PowerShell.AddArgument($MainForm)
     $null = $PowerShell.AddArgument($TerminalOutput)
 
-    # Begin asynchronous invocation
     $AsyncResultHandle = $PowerShell.BeginInvoke()
 
-    # Configure polling timer for UI thread completion checks
+    # Configure polling timer
     $Timer = New-Object System.Windows.Forms.Timer
     $Timer.Interval = 200
 
-    # Explicit State Encapsulation via Control Tag Property
-    # Avoids dynamic outer-scope lookup issues under Set-StrictMode -Version 3.0
+    # Store handles in Tag dictionary to prevent dynamic scope lookup failures
     $Timer.Tag = @{
         PowerShell    = $PowerShell
         AsyncResult   = $AsyncResultHandle
@@ -508,33 +492,31 @@ function Sync-GitHubRepositoryToolsAsync {
         RunButton     = $RunButton
     }
 
+    # Strict-mode compliant delegate callback using param($sender, $e)
     $Timer.Add_Tick({
-        # Retrieve state container directly from event sender
-        $TimerObj = [System.Windows.Forms.Timer]$Event.Sender
+        param($sender, $e)
+
+        $TimerObj = [System.Windows.Forms.Timer]$sender
         $State    = [hashtable]$TimerObj.Tag
 
-        # Check for task completion
         if ($State.AsyncResult.IsCompleted) {
-            # Halt polling immediately to prevent re-entrant execution ticks
+            # Stop timer immediately to prevent re-entrant ticks
             $TimerObj.Stop()
             $TimerObj.Dispose()
 
             try {
-                # Complete execution and collect unhandled pipeline errors
                 $null = $State.PowerShell.EndInvoke($State.AsyncResult)
             }
             catch {
-                Append-TerminalText -Message "[-] Runspace execution error: $($_.Exception.Message)" -Color ([System.Drawing.Color]::Red)
+                Append-TerminalText -Message "[-] Runspace completion error: $($_.Exception.Message)" -Color ([System.Drawing.Color]::Red)
             }
             finally {
-                # Ensure pipeline resources are freed
                 $State.PowerShell.Dispose()
 
-                # Restore UI interactive controls
+                # Re-enable UI controls safely
                 $State.RefreshButton.Enabled = $true
                 $State.RunButton.Enabled     = $true
 
-                # Update tool list display
                 Populate-ToolList
             }
         }
@@ -568,7 +550,6 @@ $MenuItemRunWindow.Add_Click({ Invoke-SelectedScriptInSecondWindow })
 
 $ClearButton.Add_Click({ $TerminalOutput.Clear() })
 
-# Double-clicking auto-launches depending on which group the script belongs to
 $ToolListView.Add_DoubleClick({
     if ($ToolListView.SelectedItems.Count -gt 0) {
         $Item = $ToolListView.SelectedItems[0]
@@ -591,5 +572,5 @@ $MainForm.Add_Load({
     Sync-GitHubRepositoryToolsAsync -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -LocalTargetDir $ToolsDirectory
 })
 
-# Launch Console
+# Display Management Console
 [void]$MainForm.ShowDialog()
