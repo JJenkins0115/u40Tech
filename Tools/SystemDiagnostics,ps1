@@ -1,0 +1,82 @@
+# ============================================================
+# Script:        SystemDiagnostics.ps1
+# Repository:    U40Tech / Tools
+# Description:   Comprehensive Workstation & Server Health Check
+# Compatibility: PowerShell 5.1+, Windows 10/11, Server 2016+
+# ============================================================
+
+Set-StrictMode -Version 3.0
+$ErrorActionPreference = "Stop"
+
+Write-Host "============================================================"
+Write-Host "               U40Tech - System Diagnostics                 "
+Write-Host "============================================================"
+Write-Host ""
+
+try {
+    # 1. Host Architecture & OS Metadata
+    Write-Host "[>] Gathering System Summary..." -ForegroundColor Cyan
+    $OS = Get-CimInstance -ClassName Win32_OperatingSystem
+    $CS = Get-CimInstance -ClassName Win32_ComputerSystem
+
+    Write-Host "    Host Name:       $($CS.DNSHostName)"
+    Write-Host "    Operating System: $($OS.Caption) (Build $($OS.BuildNumber))"
+    Write-Host "    Last Boot Time:  $($OS.LastBootUpTime)"
+    Write-Host ""
+
+    # 2. Processor & Memory Utilization
+    Write-Host "[>] Evaluating Performance Metrics..." -ForegroundColor Cyan
+    $TotalRAM = [math]::Round($OS.TotalVisibleMemorySize / 1MB, 2)
+    $FreeRAM  = [math]::Round($OS.FreePhysicalMemory / 1MB, 2)
+    $UsedRAM  = [math]::Round($TotalRAM - $FreeRAM, 2)
+    $RAMPercent = [math]::Round(($UsedRAM / $TotalRAM) * 100, 1)
+
+    Write-Host "    Memory Usage:    $UsedRAM GB / $TotalRAM GB ($RAMPercent% utilized)"
+
+    if ($RAMPercent -gt 85) {
+        Write-Host "    [!] Memory threshold warning (>85%)." -ForegroundColor Yellow
+    }
+
+    # 3. Storage Volume Health
+    Write-Host ""
+    Write-Host "[>] Checking Local Storage Health..." -ForegroundColor Cyan
+    $Disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType = 3"
+
+    foreach ($Disk in $Disks) {
+        $TotalGB = [math]::Round($Disk.Size / 1GB, 2)
+        $FreeGB  = [math]::Round($Disk.FreeSpace / 1GB, 2)
+        $FreePct = [math]::Round(($FreeGB / $TotalGB) * 100, 1)
+
+        $Status = "[+]"
+        if ($FreePct -lt 15) { $Status = "[!]" }
+
+        Write-Host "    $Status Drive $($Disk.DeviceID) Free Space: $FreeGB GB / $TotalGB GB ($FreePct% free)"
+    }
+
+    # 4. Critical Windows Services Status Check
+    Write-Host ""
+    Write-Host "[>] Auditing Essential Core Services..." -ForegroundColor Cyan
+    $CoreServices = @("LanmanServer", "Dnscache", "EventLog", "Spooler", "wuauserv")
+
+    foreach ($SvcName in $CoreServices) {
+        $Svc = Get-Service -Name $SvcName -ErrorAction SilentlyContinue
+        if (-not $Svc) {
+            Write-Host "    [-] Service Not Found: $SvcName" -ForegroundColor Red
+            continue
+        }
+
+        if ($Svc.Status -eq 'Running') {
+            Write-Host "    [+] $($Svc.DisplayName) ($SvcName): RUNNING"
+        } else {
+            Write-Host "    [!] $($Svc.DisplayName) ($SvcName): $($Svc.Status.ToString().ToUpper())" -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host ""
+    Write-Host "[+] System diagnostics completed successfully."
+}
+catch {
+    Write-Host ""
+    Write-Host "[-] Diagnostic Execution Failed: $($_.Exception.Message)"
+    exit 1
+}
