@@ -1,14 +1,14 @@
 # ============================================================
 # Script Name:   u40Tech.ps1
 # Repository:    JJenkins0115/u40Tech
-# Description:   GUI Administrative Suite with Persistent u40TechLog
-# Compatibility: PowerShell 5.1+, VS Code Terminal Host, Windows 10/11
+# Description:   Asynchronous WinForms Console with Persistent Log Reading
+# Compatibility: PowerShell 5.1+, Visual Studio Code Terminal Host, Windows 10/11
 # ============================================================
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 
-# Enforce TLS 1.2 protocol for secure remote package and API interactions
+# Force TLS 1.2 for secure GitHub API and package transfers
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Clear residual runspace variables
@@ -34,21 +34,21 @@ if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 # ------------------------------------------------------------
-# 1. ENVIRONMENT & PERSISTENT LOG DIRECTORY CONFIGURATION
+# 1. GLOBAL PATHS & ENVIRONMENT CONFIGURATION
 # ------------------------------------------------------------
 $RepoOwner  = "JJenkins0115"
 $RepoName   = "u40Tech"
 $RepoBranch = "main"
 
-# Ephemeral directory for downloaded script execution
+# Ephemeral workspace directory (purged on exit)
 $WorkspaceRoot  = Join-Path -Path $env:TEMP -ChildPath "U40Tech"
 $ToolsDirectory = Join-Path -Path $WorkspaceRoot -ChildPath "Tools"
 
-# Dedicated persistent directory for execution logs (survives UI purge)
+# Dedicated persistent directory for execution logs (survives exit & purge)
 $PersistentLogDir = Join-Path -Path $env:TEMP -ChildPath "u40TechLog"
 $HistoryFile      = Join-Path -Path $PersistentLogDir -ChildPath "script_history.json"
 
-# Ensure directories exist
+# Initialize directories explicitly at launch
 if (-not (Test-Path -Path $ToolsDirectory)) {
     New-Item -ItemType Directory -Path $ToolsDirectory -Force | Out-Null
 }
@@ -62,20 +62,28 @@ $ComputerName = $env:COMPUTERNAME
 $DomainName   = if ($CompInfo.PartOfDomain) { $CompInfo.Domain } else { "WORKGROUP ($($CompInfo.Domain))" }
 
 # ------------------------------------------------------------
-# 2. PERSISTENT EXECUTION LOGGING ENGINE
+# 2. RELIABLE LOG READ/WRITE ENGINE
 # ------------------------------------------------------------
 function Get-ScriptHistoryMap {
+    <#
+    .SYNOPSIS
+        Safely parses the persistent JSON log file without locking.
+    #>
     if (-not (Test-Path -Path $HistoryFile)) {
         return @{}
     }
+
     try {
         $RawJson = Get-Content -Path $HistoryFile -Raw -ErrorAction Stop
         if ([string]::IsNullOrWhiteSpace($RawJson)) { return @{} }
-        
-        $JsonObject = $RawJson | ConvertFrom-Json
+
+        $JsonObject = $RawJson | ConvertFrom-Json -ErrorAction Stop
         $HistoryMap = @{}
-        foreach ($Prop in $JsonObject.PSObject.Properties) {
-            $HistoryMap[$Prop.Name] = $Prop.Value
+
+        if ($null -ne $JsonObject) {
+            foreach ($Prop in $JsonObject.PSObject.Properties) {
+                $HistoryMap[$Prop.Name] = $Prop.Value
+            }
         }
         return $HistoryMap
     }
@@ -91,7 +99,6 @@ function Set-ScriptLastRunTimestamp {
         [datetime]$Timestamp = (Get-Date)
     )
 
-    # Retry loop to handle temporary file access locks during rapid I/O
     $MaxRetries = 3
     $RetryCount = 0
     $Written    = $false
@@ -104,7 +111,7 @@ function Set-ScriptLastRunTimestamp {
 
             $HistoryMap = Get-ScriptHistoryMap
             $HistoryMap[$ScriptName] = $Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
-            
+
             $JsonOutput = $HistoryMap | ConvertTo-Json -Depth 2
             Set-Content -Path $HistoryFile -Value $JsonOutput -Force -ErrorAction Stop
             $Written = $true
@@ -300,18 +307,23 @@ $ClearButton.Cursor = [System.Windows.Forms.Cursors]::Hand
 $ActionPanel.Controls.Add($ClearButton)
 
 # ------------------------------------------------------------
-# 4. HELPER FUNCTIONS & RUNTIME CONTROLLERS
+# 4. HELPER FUNCTIONS & NON-BLOCKING CONTROLLERS
 # ------------------------------------------------------------
 function Append-TerminalText {
     param(
         [string]$Message,
         [System.Drawing.Color]$Color = [System.Drawing.Color]::FromArgb(210, 210, 210)
     )
-    $TerminalOutput.SelectionStart = $TerminalOutput.TextLength
-    $TerminalOutput.SelectionLength = 0
-    $TerminalOutput.SelectionColor = $Color
-    $TerminalOutput.AppendText("$Message`r`n")
-    $TerminalOutput.ScrollToCaret()
+    if ($MainForm.IsDisposed -or -not $MainForm.IsHandleCreated) { return }
+
+    # Safely dispatch UI writes to the main WinForms event loop thread
+    $MainForm.BeginInvoke([Action]{
+        $TerminalOutput.SelectionStart = $TerminalOutput.TextLength
+        $TerminalOutput.SelectionLength = 0
+        $TerminalOutput.SelectionColor = $Color
+        $TerminalOutput.AppendText("$Message`r`n")
+        $TerminalOutput.ScrollToCaret()
+    }) | Out-Null
 }
 
 function Populate-ToolList {
@@ -327,16 +339,22 @@ function Populate-ToolList {
             $Item = New-Object System.Windows.Forms.ListViewItem($Tool.Name)
             $Item.Tag = $Tool.FullName
 
+            # Query persistent JSON map for script name match
             $LastRun = if ($HistoryMap.ContainsKey($Tool.Name)) { $HistoryMap[$Tool.Name] } else { "Never" }
             [void]$Item.SubItems.Add($LastRun)
 
             [void]$ToolListView.Items.Add($Item)
         }
-        Append-TerminalText "[+] Loaded $($ToolsList.Count) tool script(s). Execution log directory: $PersistentLogDir" ([System.Drawing.Color]::LightGreen)
+        Append-TerminalText "[+] Loaded $($ToolsList.Count) tool script(s). Execution log path: $HistoryFile" ([System.Drawing.Color]::LightGreen)
     }
 }
 
-function Invoke-SelectedScript {
+function Invoke-SelectedScriptAsync {
+    <#
+    .SYNOPSIS
+        Launches child processes completely asynchronously via WinForms event callbacks.
+        Eliminates UI freezing while keeping terminal output responsive.
+    #>
     if ($ToolListView.SelectedItems.Count -eq 0) {
         Append-TerminalText "[!] Select a tool script from the grid prior to execution." ([System.Drawing.Color]::Orange)
         return
@@ -347,18 +365,20 @@ function Invoke-SelectedScript {
     $ScriptPath   = $SelectedItem.Tag
 
     Append-TerminalText "`r`n============================================================" ([System.Drawing.Color]::FromArgb(0, 212, 255))
-    Append-TerminalText "[>] Executing: $ScriptName" ([System.Drawing.Color]::FromArgb(0, 212, 255))
+    Append-TerminalText "[>] Executing (Non-Blocking Mode): $ScriptName" ([System.Drawing.Color]::FromArgb(0, 212, 255))
     Append-TerminalText "============================================================" ([System.Drawing.Color]::FromArgb(0, 212, 255))
 
+    # Disable controls while task is executing
     $RunButton.Enabled     = $false
     $RefreshButton.Enabled = $false
     $ToolListView.Enabled  = $false
 
-    # Update Log Timestamp
+    # Write persistent log timestamp immediately
     $ExecutionTime = Get-Date
     Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
     $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
 
+    # Configure Process Start Specifications
     $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
     $ProcessInfo.FileName = "powershell.exe"
     $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
@@ -369,51 +389,49 @@ function Invoke-SelectedScript {
 
     $Process = New-Object System.Diagnostics.Process
     $Process.StartInfo = $ProcessInfo
+    $Process.EnableRaisingEvents = $true
 
-    $OutEvent = {
+    # Thread-safe Standard Output Event Handler
+    $null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -Action {
         if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
-            $MainForm.Invoke([Action[string, System.Drawing.Color]]{
-                param($str, $clr) Append-TerminalText $str $clr
-            }, $Event.SourceEventArgs.Data, [System.Drawing.Color]::LightGray)
+            Append-TerminalText $Event.SourceEventArgs.Data ([System.Drawing.Color]::LightGray)
         }
     }
 
-    $ErrEvent = {
+    # Thread-safe Standard Error Event Handler
+    $null = Register-ObjectEvent -InputObject $Process -EventName "ErrorDataReceived" -Action {
         if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
-            $MainForm.Invoke([Action[string, System.Drawing.Color]]{
-                param($str, $clr) Append-TerminalText $str $clr
-            }, $Event.SourceEventArgs.Data, [System.Drawing.Color]::Coral)
+            Append-TerminalText $Event.SourceEventArgs.Data ([System.Drawing.Color]::Coral)
         }
     }
 
-    $null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -Action $OutEvent
-    $null = Register-ObjectEvent -InputObject $Process -EventName "ErrorDataReceived" -Action $ErrEvent
+    # Asynchronous Process Exit Handler (Re-enables UI controls without blocking thread)
+    $null = Register-ObjectEvent -InputObject $Process -EventName "Exited" -Action {
+        Append-TerminalText "[+] Tool execution finalized. Process Exit Code: $($Sender.ExitCode)" ([System.Drawing.Color]::LightGreen)
 
+        if (-not $MainForm.IsDisposed -and $MainForm.IsHandleCreated) {
+            $MainForm.BeginInvoke([Action]{
+                $RunButton.Enabled     = $true
+                $RefreshButton.Enabled = $true
+                $ToolListView.Enabled  = $true
+            }) | Out-Null
+        }
+    }
+
+    # Start non-blocking process
     [void]$Process.Start()
     $Process.BeginOutputReadLine()
     $Process.BeginErrorReadLine()
-
-    while (-not $Process.HasExited) {
-        [System.Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 100
-    }
-
-    Append-TerminalText "[+] Tool execution finalized. Exit Code: $($Process.ExitCode)" ([System.Drawing.Color]::LightGreen)
-
-    $RunButton.Enabled     = $true
-    $RefreshButton.Enabled = $true
-    $ToolListView.Enabled  = $true
 }
 
 function Exit-AndPurgeWorkspace {
-    Append-TerminalText "[>] Terminating processes and purging temporary workspace context..." ([System.Drawing.Color]::Yellow)
+    Append-TerminalText "[>] Terminating background tasks and purging temporary workspace..." ([System.Drawing.Color]::Yellow)
 
     Get-Process -Name "Rapr" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
 
-    # Safely purge temporary workspace while preserving $env:TEMP\u40TechLog
     try {
         if (Test-Path -Path $WorkspaceRoot) {
             Remove-Item -Path $WorkspaceRoot -Recurse -Force -ErrorAction Stop
@@ -431,9 +449,9 @@ function Exit-AndPurgeWorkspace {
 # ------------------------------------------------------------
 # 5. EVENT HANDLERS & INITIALIZATION
 # ------------------------------------------------------------
-$RunButton.Add_Click({ Invoke-SelectedScript })
+$RunButton.Add_Click({ Invoke-SelectedScriptAsync })
 $ClearButton.Add_Click({ $TerminalOutput.Clear() })
-$ToolListView.Add_DoubleClick({ Invoke-SelectedScript })
+$ToolListView.Add_DoubleClick({ Invoke-SelectedScriptAsync })
 
 $RefreshButton.Add_Click({
     Append-TerminalText "[>] Synchronizing script objects from GitHub repository..." ([System.Drawing.Color]::Cyan)
