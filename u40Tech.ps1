@@ -419,20 +419,41 @@ function Invoke-SelectedScriptInSecondWindow {
 }
 
 function Sync-GitHubRepositoryToolsAsync {
+    <#
+    .SYNOPSIS
+        Asynchronously synchronizes tool scripts from GitHub without freezing the WinForms UI.
+    .DESCRIPTION
+        Uses PowerShell runspaces and a WinForms Timer. Execution state ($PowerShell, $AsyncResult, UI Controls)
+        is encapsulated within the $Timer.Tag dictionary to guarantee variable scope resolution under Set-StrictMode.
+    #>
     [CmdletBinding()]
-    param($Owner, $Repo, $Branch, $LocalTargetDir)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Owner,
 
+        [Parameter(Mandatory = $true)]
+        [string]$Repo,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Branch,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LocalTargetDir
+    )
+
+    # Disable control triggers to prevent concurrent execution during sync
     $RefreshButton.Enabled = $false
     $RunButton.Enabled     = $false
 
     Append-TerminalText -Message "[>] Initiating background repository sync..." -Color ([System.Drawing.Color]::Cyan)
 
+    # Isolated ScriptBlock executed within secondary runspace
     $ScriptBlock = {
         param($Owner, $Repo, $Branch, $LocalTargetDir, $MainForm, $TerminalControl)
 
         function Report-Progress {
             param([string]$Msg, [string]$ColorHex = "#D2D2D2")
-            if ($MainForm -and -not $MainForm.IsDisposed) {
+            if ($null -ne $MainForm -and -not $MainForm.IsDisposed) {
                 $null = $MainForm.BeginInvoke([Action]{
                     $TerminalControl.SelectionStart = $TerminalControl.TextLength
                     $TerminalControl.SelectionLength = 0
@@ -461,6 +482,7 @@ function Sync-GitHubRepositoryToolsAsync {
         }
     }
 
+    # Construct runspace pipeline instance
     $PowerShell = [powershell]::Create()
     $null = $PowerShell.AddScript($ScriptBlock)
     $null = $PowerShell.AddArgument($Owner)
@@ -470,20 +492,54 @@ function Sync-GitHubRepositoryToolsAsync {
     $null = $PowerShell.AddArgument($MainForm)
     $null = $PowerShell.AddArgument($TerminalOutput)
 
-    $AsyncResult = $PowerShell.BeginInvoke()
+    # Begin asynchronous invocation
+    $AsyncResultHandle = $PowerShell.BeginInvoke()
 
+    # Configure polling timer for UI thread completion checks
     $Timer = New-Object System.Windows.Forms.Timer
     $Timer.Interval = 200
+
+    # Explicit State Encapsulation via Control Tag Property
+    # Avoids dynamic outer-scope lookup issues under Set-StrictMode -Version 3.0
+    $Timer.Tag = @{
+        PowerShell    = $PowerShell
+        AsyncResult   = $AsyncResultHandle
+        RefreshButton = $RefreshButton
+        RunButton     = $RunButton
+    }
+
     $Timer.Add_Tick({
-        if ($AsyncResult.IsCompleted) {
-            $Timer.Stop()
-            $Timer.Dispose()
-            try { $null = $PowerShell.EndInvoke($AsyncResult) } finally { $PowerShell.Dispose() }
-            $RefreshButton.Enabled = $true
-            $RunButton.Enabled     = $true
-            Populate-ToolList
+        # Retrieve state container directly from event sender
+        $TimerObj = [System.Windows.Forms.Timer]$Event.Sender
+        $State    = [hashtable]$TimerObj.Tag
+
+        # Check for task completion
+        if ($State.AsyncResult.IsCompleted) {
+            # Halt polling immediately to prevent re-entrant execution ticks
+            $TimerObj.Stop()
+            $TimerObj.Dispose()
+
+            try {
+                # Complete execution and collect unhandled pipeline errors
+                $null = $State.PowerShell.EndInvoke($State.AsyncResult)
+            }
+            catch {
+                Append-TerminalText -Message "[-] Runspace execution error: $($_.Exception.Message)" -Color ([System.Drawing.Color]::Red)
+            }
+            finally {
+                # Ensure pipeline resources are freed
+                $State.PowerShell.Dispose()
+
+                # Restore UI interactive controls
+                $State.RefreshButton.Enabled = $true
+                $State.RunButton.Enabled     = $true
+
+                # Update tool list display
+                Populate-ToolList
+            }
         }
     })
+
     $Timer.Start()
 }
 
