@@ -349,7 +349,10 @@ function Append-TerminalText {
 function Populate-ToolList {
     <#
     .SYNOPSIS
-        Populates the ListView control with script files and persistent execution logs.
+        Populates the GUI ListView control with scripts from the workspace.
+    .DESCRIPTION
+        Reads the local tools directory, queries the persistent JSON history,
+        and safely updates the UI control with script names and execution timestamps.
     #>
     [CmdletBinding()]
     param()
@@ -366,12 +369,13 @@ function Populate-ToolList {
             $Item = New-Object System.Windows.Forms.ListViewItem($Tool.Name)
             $Item.Tag = $Tool.FullName
 
+            # Read execution history from key-value lookup map
             $LastRun = if ($HistoryMap.ContainsKey($Tool.Name)) { $HistoryMap[$Tool.Name] } else { "Never" }
             [void]$Item.SubItems.Add($LastRun)
 
             [void]$ToolListView.Items.Add($Item)
         }
-        Append-TerminalText -Message "[+] Loaded $($ToolsList.Count) tool script(s). Execution log path: $HistoryFile" -Color ([System.Drawing.Color]::LightGreen)
+        Append-TerminalText -Message "[+] Loaded $($ToolsList.Count) tool script(s)." -Color ([System.Drawing.Color]::LightGreen)
     }
 }
 
