@@ -1,7 +1,7 @@
 # ============================================================
 # Script Name:   u40Tech.ps1
 # Repository:    JJenkins0115/u40Tech
-# Description:   GitHub-Native Remote GUI Shell & Administrative Suite
+# Description:   GitHub-Native Remote GUI Shell & Administrative Suite with Execution Logging
 # Compatibility: PowerShell 5.1+, VS Code Terminal Host, Windows 10/11
 # ============================================================
 
@@ -18,7 +18,7 @@ Remove-Variable ActiveRunspace, ActivePipeline -ErrorAction SilentlyContinue
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Elevation Verification
+# Privilege Verification
 $Identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
 $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
 
@@ -34,7 +34,7 @@ if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 # ------------------------------------------------------------
-# 1. ENVIRONMENT DISCOVERY & WORKSPACE CONFIGURATION
+# 1. ENVIRONMENT & STATE TRACKING CONFIGURATION
 # ------------------------------------------------------------
 $RepoOwner  = "JJenkins0115"
 $RepoName   = "u40Tech"
@@ -42,15 +42,67 @@ $RepoBranch = "main"
 
 $WorkspaceRoot  = Join-Path -Path $env:TEMP -ChildPath "U40Tech"
 $ToolsDirectory = Join-Path -Path $WorkspaceRoot -ChildPath "Tools"
+$HistoryFile    = Join-Path -Path $WorkspaceRoot -ChildPath "script_history.json"
 
 if (-not (Test-Path -Path $ToolsDirectory)) {
     New-Item -ItemType Directory -Path $ToolsDirectory -Force | Out-Null
 }
 
 # System Identity Inspection
-$CompInfo   = Get-CimInstance Win32_ComputerSystem
+$CompInfo     = Get-CimInstance Win32_ComputerSystem
 $ComputerName = $env:COMPUTERNAME
 $DomainName   = if ($CompInfo.PartOfDomain) { $CompInfo.Domain } else { "WORKGROUP ($($CompInfo.Domain))" }
+
+# ------------------------------------------------------------
+# 2. PERSISTENT EXECUTION LOGGING ENGINE
+# ------------------------------------------------------------
+function Get-ScriptHistoryMap {
+    if (-not (Test-Path -Path $HistoryFile)) {
+        return @{}
+    }
+    try {
+        $RawJson = Get-Content -Path $HistoryFile -Raw -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($RawJson)) { return @{} }
+        
+        $JsonObject = $RawJson | ConvertFrom-Json
+        $HistoryMap = @{}
+        foreach ($Prop in $JsonObject.PSObject.Properties) {
+            $HistoryMap[$Prop.Name] = $Prop.Value
+        }
+        return $HistoryMap
+    }
+    catch {
+        return @{}
+    }
+}
+
+function Set-ScriptLastRunTimestamp {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ScriptName,
+        [datetime]$Timestamp = (Get-Date)
+    )
+
+    # Retry loop to gracefully handle concurrent file writes
+    $MaxRetries = 3
+    $RetryCount = 0
+    $Written    = $false
+
+    while (-not $Written -and $RetryCount -lt $MaxRetries) {
+        try {
+            $HistoryMap = Get-ScriptHistoryMap
+            $HistoryMap[$ScriptName] = $Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
+            
+            $JsonOutput = $HistoryMap | ConvertTo-Json -Depth 2
+            Set-Content -Path $HistoryFile -Value $JsonOutput -Force -ErrorAction Stop
+            $Written = $true
+        }
+        catch {
+            $RetryCount++
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
 
 function Sync-GitHubRepositoryTools {
     param(
@@ -90,11 +142,11 @@ function Sync-GitHubRepositoryTools {
 }
 
 # ------------------------------------------------------------
-# 2. SLEEK MODERN GUI SYSTEM ARCHITECTURE
+# 3. MODERN GUI LAYOUT SYSTEM
 # ------------------------------------------------------------
 $MainForm = New-Object System.Windows.Forms.Form
 $MainForm.Text = "U40Tech - Unified Systems Management Console"
-$MainForm.Size = New-Object System.Drawing.Size(1100, 720)
+$MainForm.Size = New-Object System.Drawing.Size(1150, 720)
 $MainForm.StartPosition = "CenterScreen"
 $MainForm.BackColor = [System.Drawing.Color]::FromArgb(24, 24, 24)
 $MainForm.ForeColor = [System.Drawing.Color]::White
@@ -127,7 +179,7 @@ $HeaderPanel.Controls.Add($SubTitleLabel)
 $RefreshButton = New-Object System.Windows.Forms.Button
 $RefreshButton.Text = "Refresh Scripts"
 $RefreshButton.Size = New-Object System.Drawing.Size(130, 34)
-$RefreshButton.Location = New-Object System.Drawing.Point(800, 13)
+$RefreshButton.Location = New-Object System.Drawing.Point(850, 13)
 $RefreshButton.FlatStyle = "Flat"
 $RefreshButton.FlatAppearance.BorderSize = 1
 $RefreshButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(0, 212, 255)
@@ -138,7 +190,7 @@ $HeaderPanel.Controls.Add($RefreshButton)
 $ExitButton = New-Object System.Windows.Forms.Button
 $ExitButton.Text = "Exit & Purge"
 $ExitButton.Size = New-Object System.Drawing.Size(130, 34)
-$ExitButton.Location = New-Object System.Drawing.Point(945, 13)
+$ExitButton.Location = New-Object System.Drawing.Point(995, 13)
 $ExitButton.FlatStyle = "Flat"
 $ExitButton.FlatAppearance.BorderSize = 1
 $ExitButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(255, 75, 75)
@@ -149,14 +201,14 @@ $HeaderPanel.Controls.Add($ExitButton)
 # --- SPLIT CONTAINER FOR MAIN BODY ---
 $SplitPanel = New-Object System.Windows.Forms.SplitContainer
 $SplitPanel.Dock = "Fill"
-$SplitPanel.SplitterDistance = 280
+$SplitPanel.SplitterDistance = 380
 $SplitPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 42)
 $MainForm.Controls.Add($SplitPanel)
 $SplitPanel.BringToFront()
 
 # Left Panel: Sidebar Header
 $SidebarLabel = New-Object System.Windows.Forms.Label
-$SidebarLabel.Text = "AVAILABLE TOOLS"
+$SidebarLabel.Text = "AVAILABLE TOOLS & RUN HISTORY"
 $SidebarLabel.Dock = "Top"
 $SidebarLabel.Height = 35
 $SidebarLabel.TextAlign = "MiddleCenter"
@@ -165,15 +217,22 @@ $SidebarLabel.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 200)
 $SidebarLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $SplitPanel.Panel1.Controls.Add($SidebarLabel)
 
-# Left Panel: Tools ListBox
-$ToolListBox = New-Object System.Windows.Forms.ListBox
-$ToolListBox.Dock = "Fill"
-$ToolListBox.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 22)
-$ToolListBox.ForeColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
-$ToolListBox.BorderStyle = "None"
-$ToolListBox.DisplayMember = "Name"
-$SplitPanel.Panel1.Controls.Add($ToolListBox)
-$ToolListBox.BringToFront()
+# Left Panel: Multi-Column ListView
+$ToolListView = New-Object System.Windows.Forms.ListView
+$ToolListView.Dock = "Fill"
+$ToolListView.View = [System.Windows.Forms.View]::Details
+$ToolListView.FullRowSelect = $true
+$ToolListView.GridLines = $true
+$ToolListView.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 22)
+$ToolListView.ForeColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
+$ToolListView.BorderStyle = "None"
+$ToolListView.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+
+[void]$ToolListView.Columns.Add("Script Name", 210)
+[void]$ToolListView.Columns.Add("Last Executed", 150)
+
+$SplitPanel.Panel1.Controls.Add($ToolListView)
+$ToolListView.BringToFront()
 
 # Right Panel: Output Console Header
 $ConsoleLabel = New-Object System.Windows.Forms.Label
@@ -229,7 +288,7 @@ $ClearButton.Cursor = [System.Windows.Forms.Cursors]::Hand
 $ActionPanel.Controls.Add($ClearButton)
 
 # ------------------------------------------------------------
-# 3. HELPER FUNCTIONS & ENGINE LOGIC
+# 4. HELPER FUNCTIONS & RUNTIME CONTROLLERS
 # ------------------------------------------------------------
 function Append-TerminalText {
     param(
@@ -244,34 +303,49 @@ function Append-TerminalText {
 }
 
 function Populate-ToolList {
-    $ToolListBox.Items.Clear()
-    $ToolsList = Get-ChildItem -Path $ToolsDirectory -Filter "*.ps1" -ErrorAction SilentlyContinue
+    $ToolListView.Items.Clear()
+    $ToolsList  = Get-ChildItem -Path $ToolsDirectory -Filter "*.ps1" -ErrorAction SilentlyContinue
+    $HistoryMap = Get-ScriptHistoryMap
+
     if (-not $ToolsList) {
         Append-TerminalText "[!] No .ps1 tools located in workspace directory." ([System.Drawing.Color]::Yellow)
     }
     else {
         foreach ($Tool in $ToolsList) {
-            [void]$ToolListBox.Items.Add($Tool)
+            $Item = New-Object System.Windows.Forms.ListViewItem($Tool.Name)
+            $Item.Tag = $Tool.FullName
+
+            $LastRun = if ($HistoryMap.ContainsKey($Tool.Name)) { $HistoryMap[$Tool.Name] } else { "Never" }
+            [void]$Item.SubItems.Add($LastRun)
+
+            [void]$ToolListView.Items.Add($Item)
         }
-        Append-TerminalText "[+] Loaded $($ToolsList.Count) tool script(s) into workspace." ([System.Drawing.Color]::LightGreen)
+        Append-TerminalText "[+] Loaded $($ToolsList.Count) tool script(s) with historical timestamps." ([System.Drawing.Color]::LightGreen)
     }
 }
 
 function Invoke-SelectedScript {
-    $Selected = $ToolListBox.SelectedItem
-    if (-not $Selected) {
-        Append-TerminalText "[!] Select a tool script from the left listbox prior to execution." ([System.Drawing.Color]::Orange)
+    if ($ToolListView.SelectedItems.Count -eq 0) {
+        Append-TerminalText "[!] Select a tool script from the grid prior to execution." ([System.Drawing.Color]::Orange)
         return
     }
 
-    $ScriptPath = $Selected.FullName
+    $SelectedItem = $ToolListView.SelectedItems[0]
+    $ScriptName   = $SelectedItem.Text
+    $ScriptPath   = $SelectedItem.Tag
+
     Append-TerminalText "`r`n============================================================" ([System.Drawing.Color]::FromArgb(0, 212, 255))
-    Append-TerminalText "[>] Executing: $($Selected.Name)" ([System.Drawing.Color]::FromArgb(0, 212, 255))
+    Append-TerminalText "[>] Executing: $ScriptName" ([System.Drawing.Color]::FromArgb(0, 212, 255))
     Append-TerminalText "============================================================" ([System.Drawing.Color]::FromArgb(0, 212, 255))
 
-    $RunButton.Enabled = $false
+    $RunButton.Enabled     = $false
     $RefreshButton.Enabled = $false
-    $ToolListBox.Enabled = $false
+    $ToolListView.Enabled  = $false
+
+    # Update Execution Log Timestamp
+    $ExecutionTime = Get-Date
+    Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
+    $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
 
     $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
     $ProcessInfo.FileName = "powershell.exe"
@@ -285,7 +359,7 @@ function Invoke-SelectedScript {
     $Process.StartInfo = $ProcessInfo
 
     $OutEvent = {
-        if (-not [string]::IsNullOrEmpty($Event.SourceEventArgs.Data)) {
+        if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
             $MainForm.Invoke([Action[string, System.Drawing.Color]]{
                 param($str, $clr) Append-TerminalText $str $clr
             }, $Event.SourceEventArgs.Data, [System.Drawing.Color]::LightGray)
@@ -293,7 +367,7 @@ function Invoke-SelectedScript {
     }
 
     $ErrEvent = {
-        if (-not [string]::IsNullOrEmpty($Event.SourceEventArgs.Data)) {
+        if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
             $MainForm.Invoke([Action[string, System.Drawing.Color]]{
                 param($str, $clr) Append-TerminalText $str $clr
             }, $Event.SourceEventArgs.Data, [System.Drawing.Color]::Coral)
@@ -314,15 +388,14 @@ function Invoke-SelectedScript {
 
     Append-TerminalText "[+] Tool execution finalized. Process Exit Code: $($Process.ExitCode)" ([System.Drawing.Color]::LightGreen)
 
-    $RunButton.Enabled = $true
+    $RunButton.Enabled     = $true
     $RefreshButton.Enabled = $true
-    $ToolListBox.Enabled = $true
+    $ToolListView.Enabled  = $true
 }
 
 function Exit-AndPurgeWorkspace {
-    Append-TerminalText "[>] Terminating child runtime tools and purging temporary workspace..." ([System.Drawing.Color]::Yellow)
-    
-    # Terminate background driver explorer instances if running
+    Append-TerminalText "[>] Terminating child processes and purging workspace context..." ([System.Drawing.Color]::Yellow)
+
     Get-Process -Name "Rapr" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
     [System.GC]::Collect()
@@ -335,21 +408,21 @@ function Exit-AndPurgeWorkspace {
         }
     }
     catch {
-        Write-Host "[-] Warning: Failed to completely wipe temp folder ($($_.Exception.Message))" -ForegroundColor Red
+        Write-Host "[-] Warning: Failed to wipe temp directory ($($_.Exception.Message))" -ForegroundColor Red
     }
 
     $MainForm.Close()
 }
 
 # ------------------------------------------------------------
-# 4. EVENT BINDINGS & HOST INITIALIZATION
+# 5. EVENT HANDLERS & INITIALIZATION
 # ------------------------------------------------------------
 $RunButton.Add_Click({ Invoke-SelectedScript })
 $ClearButton.Add_Click({ $TerminalOutput.Clear() })
-$ToolListBox.Add_DoubleClick({ Invoke-SelectedScript })
+$ToolListView.Add_DoubleClick({ Invoke-SelectedScript })
 
 $RefreshButton.Add_Click({
-    Append-TerminalText "[>] Re-synchronizing tools from remote GitHub repository..." ([System.Drawing.Color]::Cyan)
+    Append-TerminalText "[>] Synchronizing script files from GitHub repository..." ([System.Drawing.Color]::Cyan)
     Sync-GitHubRepositoryTools -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -LocalTargetDir $ToolsDirectory
     Populate-ToolList
 })
@@ -362,5 +435,5 @@ $MainForm.Add_Load({
     Populate-ToolList
 })
 
-# Launch Application Form
+# Display Form
 [void]$MainForm.ShowDialog()
