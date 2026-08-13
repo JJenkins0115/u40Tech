@@ -74,7 +74,7 @@ function Get-ScriptHistoryMap {
     }
 
     try {
-        $RawJson = Get-Content -Path $HistoryFile -Raw -ErrorAction Stop
+        $RawJson = [System.IO.File]::ReadAllText($HistoryFile)
         if ([string]::IsNullOrWhiteSpace($RawJson)) { return @{} }
 
         $JsonObject = $RawJson | ConvertFrom-Json -ErrorAction Stop
@@ -82,7 +82,7 @@ function Get-ScriptHistoryMap {
 
         if ($null -ne $JsonObject) {
             foreach ($Prop in $JsonObject.PSObject.Properties) {
-                $HistoryMap[$Prop.Name] = $Prop.Value
+                $HistoryMap[$Prop.Name] = [string]$Prop.Value
             }
         }
         return $HistoryMap
@@ -100,7 +100,7 @@ function Set-ScriptLastRunTimestamp {
         [datetime]$Timestamp = (Get-Date)
     )
 
-    $MaxRetries = 3
+    $MaxRetries = 5
     $RetryCount = 0
     $Written    = $false
 
@@ -114,7 +114,7 @@ function Set-ScriptLastRunTimestamp {
             $HistoryMap[$ScriptName] = $Timestamp.ToString("yyyy-MM-dd HH:mm:ss")
 
             $JsonOutput = $HistoryMap | ConvertTo-Json -Depth 2
-            Set-Content -Path $HistoryFile -Value $JsonOutput -Force -ErrorAction Stop
+            [System.IO.File]::WriteAllText($HistoryFile, $JsonOutput)
             $Written = $true
         }
         catch {
@@ -124,49 +124,12 @@ function Set-ScriptLastRunTimestamp {
     }
 }
 
-function Sync-GitHubRepositoryTools {
-    param(
-        [string]$Owner,
-        [string]$Repo,
-        [string]$Branch,
-        [string]$LocalTargetDir
-    )
-
-    Write-Host "[>] Querying GitHub Repository API ($Owner/$Repo)..." -ForegroundColor Cyan
-
-    $ApiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/Tools?ref=$Branch"
-    $UserAgent = "U40Tech-PowerShell-Host"
-
-    try {
-        $Response = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = $UserAgent } -Method Get -ErrorAction Stop
-        $ScriptFiles = $Response | Where-Object { $_.type -eq "file" -and $_.name -like "*.ps1" }
-
-        if (-not $ScriptFiles) {
-            Write-Host "[!] No script objects returned by API manifest." -ForegroundColor Yellow
-            return
-        }
-
-        foreach ($FileObj in $ScriptFiles) {
-            $DownloadUrl = $FileObj.download_url
-            $FileName    = $FileObj.name
-            $Destination = Join-Path -Path $LocalTargetDir -ChildPath $FileName
-
-            Invoke-RestMethod -Uri $DownloadUrl -OutFile $Destination -ErrorAction Stop
-            Unblock-File -Path $Destination -ErrorAction SilentlyContinue
-            Write-Host "    [+] Downloaded and Cached: $FileName" -ForegroundColor Green
-        }
-    }
-    catch {
-        Write-Host "    [-] GitHub API call failed ($($_.Exception.Message)). Using local cache if available." -ForegroundColor Red
-    }
-}
-
 # ------------------------------------------------------------
 # 3. GUI LAYOUT SYSTEM
 # ------------------------------------------------------------
 $MainForm = New-Object System.Windows.Forms.Form
 $MainForm.Text = "U40Tech - Unified Systems Management Console"
-$MainForm.Size = New-Object System.Drawing.Size(1150, 720)
+$MainForm.Size = New-Object System.Drawing.Size(1200, 750)
 $MainForm.StartPosition = "CenterScreen"
 $MainForm.BackColor = [System.Drawing.Color]::FromArgb(24, 24, 24)
 $MainForm.ForeColor = [System.Drawing.Color]::White
@@ -199,7 +162,7 @@ $HeaderPanel.Controls.Add($SubTitleLabel)
 $RefreshButton = New-Object System.Windows.Forms.Button
 $RefreshButton.Text = "Refresh Scripts"
 $RefreshButton.Size = New-Object System.Drawing.Size(130, 34)
-$RefreshButton.Location = New-Object System.Drawing.Point(850, 13)
+$RefreshButton.Location = New-Object System.Drawing.Point(900, 13)
 $RefreshButton.FlatStyle = "Flat"
 $RefreshButton.FlatAppearance.BorderSize = 1
 $RefreshButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(0, 212, 255)
@@ -210,7 +173,7 @@ $HeaderPanel.Controls.Add($RefreshButton)
 $ExitButton = New-Object System.Windows.Forms.Button
 $ExitButton.Text = "Exit & Purge"
 $ExitButton.Size = New-Object System.Drawing.Size(130, 34)
-$ExitButton.Location = New-Object System.Drawing.Point(995, 13)
+$ExitButton.Location = New-Object System.Drawing.Point(1045, 13)
 $ExitButton.FlatStyle = "Flat"
 $ExitButton.FlatAppearance.BorderSize = 1
 $ExitButton.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(255, 75, 75)
@@ -221,7 +184,7 @@ $HeaderPanel.Controls.Add($ExitButton)
 # --- SPLIT CONTAINER FOR MAIN BODY ---
 $SplitPanel = New-Object System.Windows.Forms.SplitContainer
 $SplitPanel.Dock = "Fill"
-$SplitPanel.SplitterDistance = 380
+$SplitPanel.SplitterDistance = 420
 $SplitPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 42)
 $MainForm.Controls.Add($SplitPanel)
 $SplitPanel.BringToFront()
@@ -248,11 +211,23 @@ $ToolListView.ForeColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
 $ToolListView.BorderStyle = "None"
 $ToolListView.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
 
-[void]$ToolListView.Columns.Add("Script Name", 210)
-[void]$ToolListView.Columns.Add("Last Executed", 150)
+[void]$ToolListView.Columns.Add("Script Name", 220)
+[void]$ToolListView.Columns.Add("Last Executed", 170)
+
+# ListView Groups
+$GroupInline   = New-Object System.Windows.Forms.ListViewGroup("Inline Tools (Main Terminal)", [System.Windows.Forms.HorizontalAlignment]::Left)
+$GroupExternal = New-Object System.Windows.Forms.ListViewGroup("Second Window Tools (Standalone)", [System.Windows.Forms.HorizontalAlignment]::Left)
+[void]$ToolListView.Groups.Add($GroupInline)
+[void]$ToolListView.Groups.Add($GroupExternal)
 
 $SplitPanel.Panel1.Controls.Add($ToolListView)
 $ToolListView.BringToFront()
+
+# Context Submenu
+$ContextMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$MenuItemRunInline = $ContextMenu.Items.Add("Run in Main Terminal (Inline)")
+$MenuItemRunWindow = $ContextMenu.Items.Add("Launch in Second Window")
+$ToolListView.ContextMenuStrip = $ContextMenu
 
 # Right Panel Header
 $ConsoleLabel = New-Object System.Windows.Forms.Label
@@ -287,7 +262,7 @@ $ActionPanel.BringToFront()
 
 $RunButton = New-Object System.Windows.Forms.Button
 $RunButton.Text = "Execute Selected Tool"
-$RunButton.Size = New-Object System.Drawing.Size(200, 32)
+$RunButton.Size = New-Object System.Drawing.Size(170, 32)
 $RunButton.Location = New-Object System.Drawing.Point(10, 9)
 $RunButton.FlatStyle = "Flat"
 $RunButton.FlatAppearance.BorderSize = 1
@@ -296,10 +271,21 @@ $RunButton.ForeColor = [System.Drawing.Color]::FromArgb(0, 212, 255)
 $RunButton.Cursor = [System.Windows.Forms.Cursors]::Hand
 $ActionPanel.Controls.Add($RunButton)
 
+$RunWindowButton = New-Object System.Windows.Forms.Button
+$RunWindowButton.Text = "Open in Second Window"
+$RunWindowButton.Size = New-Object System.Drawing.Size(180, 32)
+$RunWindowButton.Location = New-Object System.Drawing.Point(190, 9)
+$RunWindowButton.FlatStyle = "Flat"
+$RunWindowButton.FlatAppearance.BorderSize = 1
+$RunWindowButton.FlatAppearance.BorderColor = [System.Drawing.Color]::MediumSpringGreen
+$RunWindowButton.ForeColor = [System.Drawing.Color]::MediumSpringGreen
+$RunWindowButton.Cursor = [System.Windows.Forms.Cursors]::Hand
+$ActionPanel.Controls.Add($RunWindowButton)
+
 $ClearButton = New-Object System.Windows.Forms.Button
 $ClearButton.Text = "Clear Console"
-$ClearButton.Size = New-Object System.Drawing.Size(120, 32)
-$ClearButton.Location = New-Object System.Drawing.Point(220, 9)
+$ClearButton.Size = New-Object System.Drawing.Size(110, 32)
+$ClearButton.Location = New-Object System.Drawing.Point(380, 9)
 $ClearButton.FlatStyle = "Flat"
 $ClearButton.FlatAppearance.BorderSize = 1
 $ClearButton.FlatAppearance.BorderColor = [System.Drawing.Color]::Gray
@@ -308,26 +294,16 @@ $ClearButton.Cursor = [System.Windows.Forms.Cursors]::Hand
 $ActionPanel.Controls.Add($ClearButton)
 
 # ------------------------------------------------------------
-# 4. HELPER FUNCTIONS & ASYNCHRONOUS EXECUTION ENGINE
+# 4. HELPER & EXECUTION FUNCTIONS
 # ------------------------------------------------------------
 function Append-TerminalText {
-    <#
-    .SYNOPSIS
-        Appends text safely to the UI output control across runspace threads.
-    #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true, Position = 0)]
-        [AllowEmptyString()]
-        [string]$Message,
-
-        [Parameter(Mandatory = $false, Position = 1)]
-        [System.Drawing.Color]$Color = [System.Drawing.Color]::FromArgb(210, 210, 210)
+        [Parameter(Mandatory = $true, Position = 0)][AllowEmptyString()][string]$Message,
+        [Parameter(Mandatory = $false, Position = 1)][System.Drawing.Color]$Color = [System.Drawing.Color]::FromArgb(210, 210, 210)
     )
 
-    if ($null -eq $MainForm -or $MainForm.IsDisposed -or -not $MainForm.IsHandleCreated) {
-        return
-    }
+    if ($null -eq $MainForm -or $MainForm.IsDisposed -or -not $MainForm.IsHandleCreated) { return }
 
     [string]$SafeMessage = $Message
     [System.Drawing.Color]$SafeColor = $Color
@@ -340,17 +316,11 @@ function Append-TerminalText {
             $TerminalOutput.AppendText("$SafeMessage`r`n")
             $TerminalOutput.ScrollToCaret()
         }
-        catch {
-            # Catch non-critical UI render race conditions during application exit
-        }
+        catch {}
     })
 }
 
 function Populate-ToolList {
-    <#
-    .SYNOPSIS
-        Populates the ListView control with script files and persistent execution logs.
-    #>
     [CmdletBinding()]
     param()
 
@@ -360,25 +330,35 @@ function Populate-ToolList {
 
     if (-not $ToolsList) {
         Append-TerminalText -Message "[!] No .ps1 tools found in workspace directory." -Color ([System.Drawing.Color]::Yellow)
+        return
     }
-    else {
-        foreach ($Tool in $ToolsList) {
-            $Item = New-Object System.Windows.Forms.ListViewItem($Tool.Name)
-            $Item.Tag = $Tool.FullName
 
-            $LastRun = if ($HistoryMap.ContainsKey($Tool.Name)) { $HistoryMap[$Tool.Name] } else { "Never" }
-            [void]$Item.SubItems.Add($LastRun)
+    foreach ($Tool in $ToolsList) {
+        $Item = New-Object System.Windows.Forms.ListViewItem($Tool.Name)
+        $Item.Tag = $Tool.FullName
 
-            [void]$ToolListView.Items.Add($Item)
+        # Header inspection for auto-grouping
+        $FirstLines = Get-Content -Path $Tool.FullName -TotalCount 5 -ErrorAction SilentlyContinue
+        $IsSecondWindowMode = $FirstLines | Where-Object { $_ -like "*ExecutionMode:*SecondWindow*" }
+
+        if ($IsSecondWindowMode) {
+            $Item.Group = $ToolListView.Groups[1]
+        } else {
+            $Item.Group = $ToolListView.Groups[0]
         }
-        Append-TerminalText -Message "[+] Loaded $($ToolsList.Count) tool script(s). Execution log path: $HistoryFile" -Color ([System.Drawing.Color]::LightGreen)
+
+        $LastRun = if ($HistoryMap.ContainsKey($Tool.Name)) { $HistoryMap[$Tool.Name] } else { "Never" }
+        [void]$Item.SubItems.Add($LastRun)
+
+        [void]$ToolListView.Items.Add($Item)
     }
+    Append-TerminalText -Message "[+] Loaded $($ToolsList.Count) tool script(s). Execution log path: $HistoryFile" -Color ([System.Drawing.Color]::LightGreen)
 }
 
-function Invoke-SelectedScriptAsync {
+function Invoke-SelectedScriptInline {
     <#
     .SYNOPSIS
-        Executes child PowerShell processes asynchronously to eliminate GUI freezing.
+        Executes child PowerShell processes asynchronously with strict-mode compliant event bindings.
     #>
     [CmdletBinding()]
     param()
@@ -393,15 +373,16 @@ function Invoke-SelectedScriptAsync {
     $ScriptPath   = $SelectedItem.Tag
 
     Append-TerminalText -Message "`r`n============================================================" -Color ([System.Drawing.Color]::FromArgb(0, 212, 255))
-    Append-TerminalText -Message "[>] Executing (Non-Blocking Mode): $ScriptName" -Color ([System.Drawing.Color]::FromArgb(0, 212, 255))
+    Append-TerminalText -Message "[>] Executing (Main Terminal): $ScriptName" -Color ([System.Drawing.Color]::FromArgb(0, 212, 255))
     Append-TerminalText -Message "============================================================" -Color ([System.Drawing.Color]::FromArgb(0, 212, 255))
 
-    # Disable controls while child process executes
-    $RunButton.Enabled     = $false
-    $RefreshButton.Enabled = $false
-    $ToolListView.Enabled  = $false
+    # Disable controls during execution
+    $RunButton.Enabled       = $false
+    $RunWindowButton.Enabled = $false
+    $RefreshButton.Enabled   = $false
+    $ToolListView.Enabled    = $false
 
-    # Persist run timestamp immediately
+    # Log timestamp
     $ExecutionTime = Get-Date
     Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
     $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
@@ -410,38 +391,54 @@ function Invoke-SelectedScriptAsync {
     $ProcessInfo.FileName = "powershell.exe"
     $ProcessInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
     $ProcessInfo.RedirectStandardOutput = $true
-    $ProcessInfo.RedirectStandardError = $true
-    $ProcessInfo.UseShellExecute = $false
-    $ProcessInfo.CreateNoWindow = $true
+    $ProcessInfo.RedirectStandardError  = $true
+    $ProcessInfo.UseShellExecute        = $false
+    $ProcessInfo.CreateNoWindow         = $true
 
     $Process = New-Object System.Diagnostics.Process
     $Process.StartInfo = $ProcessInfo
     $Process.EnableRaisingEvents = $true
 
-    # Event subscription for stdout
-    $null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -Action {
-        if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
-            Append-TerminalText -Message $Event.SourceEventArgs.Data -Color ([System.Drawing.Color]::LightGray)
+    $SubOutId  = "Out_$(Get-Random)"
+    $SubErrId  = "Err_$(Get-Random)"
+    $SubExitId = "Exit_$(Get-Random)"
+
+    # Strict-mode compliant output event subscriber
+    $null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -SourceIdentifier $SubOutId -Action {
+        param($evtSender, $evtArgs)
+        if ($null -ne $evtArgs -and -not [string]::IsNullOrWhiteSpace($evtArgs.Data)) {
+            Append-TerminalText -Message $evtArgs.Data -Color ([System.Drawing.Color]::LightGray)
         }
     }
 
-    # Event subscription for stderr
-    $null = Register-ObjectEvent -InputObject $Process -EventName "ErrorDataReceived" -Action {
-        if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
-            Append-TerminalText -Message $Event.SourceEventArgs.Data -Color ([System.Drawing.Color]::Coral)
+    # Strict-mode compliant error event subscriber
+    $null = Register-ObjectEvent -InputObject $Process -EventName "ErrorDataReceived" -SourceIdentifier $SubErrId -Action {
+        param($evtSender, $evtArgs)
+        if ($null -ne $evtArgs -and -not [string]::IsNullOrWhiteSpace($evtArgs.Data)) {
+            Append-TerminalText -Message $evtArgs.Data -Color ([System.Drawing.Color]::Coral)
         }
     }
 
-    # Event subscription for process completion
-    $null = Register-ObjectEvent -InputObject $Process -EventName "Exited" -Action {
-        Append-TerminalText -Message "[+] Tool execution finalized. Process Exit Code: $($Sender.ExitCode)" -Color ([System.Drawing.Color]::LightGreen)
-
-        if (-not $MainForm.IsDisposed -and $MainForm.IsHandleCreated) {
-            $null = $MainForm.BeginInvoke([Action]{
-                $RunButton.Enabled     = $true
-                $RefreshButton.Enabled = $true
-                $ToolListView.Enabled  = $true
-            })
+    # Strict-mode compliant completion subscriber
+    $null = Register-ObjectEvent -InputObject $Process -EventName "Exited" -SourceIdentifier $SubExitId -Action {
+        param($evtSender, $evtArgs)
+        try {
+            $ExitCode = 0
+            if ($null -ne $evtSender) { $ExitCode = $evtSender.ExitCode }
+            Append-TerminalText -Message "[+] Tool execution finalized. Process Exit Code: $ExitCode" -Color ([System.Drawing.Color]::LightGreen)
+        }
+        finally {
+            # Guaranteed UI control restoration
+            if ($null -ne $MainForm -and -not $MainForm.IsDisposed -and $MainForm.IsHandleCreated) {
+                $null = $MainForm.BeginInvoke([Action]{
+                    $RunButton.Enabled       = $true
+                    $RunWindowButton.Enabled = $true
+                    $RefreshButton.Enabled   = $true
+                    $ToolListView.Enabled    = $true
+                })
+            }
+            # Clean up event subscribers to prevent host memory leak
+            Unregister-Event -SourceIdentifier $EventSubscriber.SourceIdentifier -ErrorAction SilentlyContinue
         }
     }
 
@@ -450,15 +447,141 @@ function Invoke-SelectedScriptAsync {
     $Process.BeginErrorReadLine()
 }
 
+function Invoke-SelectedScriptInSecondWindow {
+    if ($ToolListView.SelectedItems.Count -eq 0) {
+        Append-TerminalText -Message "[!] Select a tool script prior to execution." -Color ([System.Drawing.Color]::Orange)
+        return
+    }
+
+    $SelectedItem = $ToolListView.SelectedItems[0]
+    $ScriptName   = $SelectedItem.Text
+    $ScriptPath   = $SelectedItem.Tag
+
+    Append-TerminalText -Message "[>] Launching in dedicated process window: $ScriptName" -Color ([System.Drawing.Color]::MediumSpringGreen)
+
+    $ExecutionTime = Get-Date
+    Set-ScriptLastRunTimestamp -ScriptName $ScriptName -Timestamp $ExecutionTime
+    $SelectedItem.SubItems[1].Text = $ExecutionTime.ToString("yyyy-MM-dd HH:mm:ss")
+
+    Start-Process powershell.exe -ArgumentList "-NoExit -ExecutionPolicy Bypass -File `"$ScriptPath`""
+}
+
+function Sync-GitHubRepositoryToolsAsync {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Owner,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Repo,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Branch,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LocalTargetDir
+    )
+
+    $RefreshButton.Enabled   = $false
+    $RunButton.Enabled       = $false
+    $RunWindowButton.Enabled = $false
+
+    Append-TerminalText -Message "[>] Initiating background repository sync..." -Color ([System.Drawing.Color]::Cyan)
+
+    $ScriptBlock = {
+        param($Owner, $Repo, $Branch, $LocalTargetDir, $MainForm, $TerminalControl)
+
+        function Report-Progress {
+            param([string]$Msg, [string]$ColorHex = "#D2D2D2")
+            if ($null -ne $MainForm -and -not $MainForm.IsDisposed) {
+                $null = $MainForm.BeginInvoke([Action]{
+                    $TerminalControl.SelectionStart = $TerminalControl.TextLength
+                    $TerminalControl.SelectionLength = 0
+                    $TerminalControl.SelectionColor = [System.Drawing.ColorTranslator]::FromHtml($ColorHex)
+                    $TerminalControl.AppendText("$Msg`r`n")
+                    $TerminalControl.ScrollToCaret()
+                })
+            }
+        }
+
+        try {
+            $ApiUrl = "https://api.github.com/repos/$Owner/$Repo/contents/Tools?ref=$Branch"
+            $Response = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = "U40Tech-Host" } -Method Get -ErrorAction Stop
+            $ScriptFiles = $Response | Where-Object { $_.type -eq "file" -and $_.name -like "*.ps1" }
+
+            foreach ($FileObj in $ScriptFiles) {
+                $Destination = Join-Path -Path $LocalTargetDir -ChildPath $FileObj.name
+                Invoke-RestMethod -Uri $FileObj.download_url -OutFile $Destination -ErrorAction Stop
+                Unblock-File -Path $Destination -ErrorAction SilentlyContinue
+                Report-Progress -Msg "    [+] Downloaded and Cached: $($FileObj.name)" -ColorHex "#90EE90"
+            }
+            Report-Progress -Msg "[+] Sync completed successfully." -ColorHex "#90EE90"
+        }
+        catch {
+            Report-Progress -Msg "    [-] Sync failed ($($_.Exception.Message)). Using local cache if available." -ColorHex "#FF6347"
+        }
+    }
+
+    # Background runspace invocation
+    $PowerShell = [powershell]::Create()
+    $null = $PowerShell.AddScript($ScriptBlock)
+    $null = $PowerShell.AddArgument($Owner)
+    $null = $PowerShell.AddArgument($Repo)
+    $null = $PowerShell.AddArgument($Branch)
+    $null = $PowerShell.AddArgument($LocalTargetDir)
+    $null = $PowerShell.AddArgument($MainForm)
+    $null = $PowerShell.AddArgument($TerminalOutput)
+
+    $AsyncResultHandle = $PowerShell.BeginInvoke()
+
+    # Polling timer for thread synchronization
+    $Timer = New-Object System.Windows.Forms.Timer
+    $Timer.Interval = 200
+    $Timer.Tag = @{
+        PowerShell      = $PowerShell
+        AsyncResult     = $AsyncResultHandle
+        RefreshButton   = $RefreshButton
+        RunButton       = $RunButton
+        RunWindowButton = $RunWindowButton
+    }
+
+    $Timer.Add_Tick({
+        param($sender, $e)
+
+        $TimerObj = [System.Windows.Forms.Timer]$sender
+        $State    = [hashtable]$TimerObj.Tag
+
+        if ($State.AsyncResult.IsCompleted) {
+            $TimerObj.Stop()
+            $TimerObj.Dispose()
+
+            try {
+                $null = $State.PowerShell.EndInvoke($State.AsyncResult)
+            }
+            catch {
+                Append-TerminalText -Message "[-] Runspace error: $($_.Exception.Message)" -Color ([System.Drawing.Color]::Red)
+            }
+            finally {
+                $State.PowerShell.Dispose()
+
+                # Restore UI control status
+                $State.RefreshButton.Enabled   = $true
+                $State.RunButton.Enabled       = $true
+                $State.RunWindowButton.Enabled = $true
+
+                Populate-ToolList
+            }
+        }
+    })
+
+    $Timer.Start()
+}
+
 function Exit-AndPurgeWorkspace {
-    <#
-    .SYNOPSIS
-        Purges temporary workspace tools while leaving persistent logs intact.
-    #>
     [CmdletBinding()]
     param()
 
-    Append-TerminalText -Message "[>] Terminating background tasks and purging temporary workspace..." -Color ([System.Drawing.Color]::Yellow)
+    Append-TerminalText -Message "[>] Purging temporary workspace..." -Color ([System.Drawing.Color]::Yellow)
 
     Get-Process -Name "Rapr" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
@@ -482,23 +605,34 @@ function Exit-AndPurgeWorkspace {
 # ------------------------------------------------------------
 # 5. EVENT BINDING & APPLICATION ENTRY POINT
 # ------------------------------------------------------------
-$RunButton.Add_Click({ Invoke-SelectedScriptAsync })
+$RunButton.Add_Click({ Invoke-SelectedScriptInline })
+$RunWindowButton.Add_Click({ Invoke-SelectedScriptInSecondWindow })
+$MenuItemRunInline.Add_Click({ Invoke-SelectedScriptInline })
+$MenuItemRunWindow.Add_Click({ Invoke-SelectedScriptInSecondWindow })
+
 $ClearButton.Add_Click({ $TerminalOutput.Clear() })
-$ToolListView.Add_DoubleClick({ Invoke-SelectedScriptAsync })
+
+$ToolListView.Add_DoubleClick({
+    if ($ToolListView.SelectedItems.Count -gt 0) {
+        $Item = $ToolListView.SelectedItems[0]
+        if ($null -ne $Item.Group -and $Item.Group.Header -like "*Second Window*") {
+            Invoke-SelectedScriptInSecondWindow
+        } else {
+            Invoke-SelectedScriptInline
+        }
+    }
+})
 
 $RefreshButton.Add_Click({
-    Append-TerminalText -Message "[>] Synchronizing script objects from GitHub repository..." -Color ([System.Drawing.Color]::Cyan)
-    Sync-GitHubRepositoryTools -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -LocalTargetDir $ToolsDirectory
-    Populate-ToolList
+    Sync-GitHubRepositoryToolsAsync -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -LocalTargetDir $ToolsDirectory
 })
 
 $ExitButton.Add_Click({ Exit-AndPurgeWorkspace })
 
 $MainForm.Add_Load({
     Append-TerminalText -Message "[+] U40Tech Console Initialized." -Color ([System.Drawing.Color]::LightGreen)
-    Sync-GitHubRepositoryTools -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -LocalTargetDir $ToolsDirectory
-    Populate-ToolList
+    Sync-GitHubRepositoryToolsAsync -Owner $RepoOwner -Repo $RepoName -Branch $RepoBranch -LocalTargetDir $ToolsDirectory
 })
 
-# Launch GUI Console
+# Display Management Console
 [void]$MainForm.ShowDialog()
