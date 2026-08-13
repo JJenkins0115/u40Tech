@@ -310,45 +310,47 @@ $ActionPanel.Controls.Add($ClearButton)
 # 4. HELPER FUNCTIONS & NON-BLOCKING CONTROLLERS
 # ------------------------------------------------------------
 function Append-TerminalText {
+    <#
+    .SYNOPSIS
+        Appends formatted text safely to the console output text box.
+    .DESCRIPTION
+        Guarantees thread-safe UI updates by marshaling execution back to the
+        primary WinForms thread via BeginInvoke. Explicitly defines all default
+        parameters to prevent 'Set-StrictMode' missing-variable exceptions.
+    #>
+    [CmdletBinding()]
     param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [AllowEmptyString()]
         [string]$Message,
+
+        [Parameter(Mandatory = $false, Position = 1)]
         [System.Drawing.Color]$Color = [System.Drawing.Color]::FromArgb(210, 210, 210)
     )
-    if ($MainForm.IsDisposed -or -not $MainForm.IsHandleCreated) { return }
 
-    # Safely dispatch UI writes to the main WinForms event loop thread
-    $MainForm.BeginInvoke([Action]{
-        $TerminalOutput.SelectionStart = $TerminalOutput.TextLength
-        $TerminalOutput.SelectionLength = 0
-        $TerminalOutput.SelectionColor = $Color
-        $TerminalOutput.AppendText("$Message`r`n")
-        $TerminalOutput.ScrollToCaret()
-    }) | Out-Null
-}
-
-function Populate-ToolList {
-    $ToolListView.Items.Clear()
-    $ToolsList  = Get-ChildItem -Path $ToolsDirectory -Filter "*.ps1" -ErrorAction SilentlyContinue
-    $HistoryMap = Get-ScriptHistoryMap
-
-    if (-not $ToolsList) {
-        Append-TerminalText "[!] No .ps1 tools found in workspace directory." ([System.Drawing.Color]::Yellow)
+    # Ensure UI form handle exists prior to marshaling
+    if ($null -eq $MainForm -or $MainForm.IsDisposed -or -not $MainForm.IsHandleCreated) {
+        return
     }
-    else {
-        foreach ($Tool in $ToolsList) {
-            $Item = New-Object System.Windows.Forms.ListViewItem($Tool.Name)
-            $Item.Tag = $Tool.FullName
 
-            # Query persistent JSON map for script name match
-            $LastRun = if ($HistoryMap.ContainsKey($Tool.Name)) { $HistoryMap[$Tool.Name] } else { "Never" }
-            [void]$Item.SubItems.Add($LastRun)
+    # Store arguments locally to prevent delegate closure variable scope loss
+    [string]$SafeMessage = $Message
+    [System.Drawing.Color]$SafeColor = $Color
 
-            [void]$ToolListView.Items.Add($Item)
+    # Marshal UI updates cleanly onto the main thread
+    $null = $MainForm.BeginInvoke([Action]{
+        try {
+            $TerminalOutput.SelectionStart = $TerminalOutput.TextLength
+            $TerminalOutput.SelectionLength = 0
+            $TerminalOutput.SelectionColor = $SafeColor
+            $TerminalOutput.AppendText("$SafeMessage`r`n")
+            $TerminalOutput.ScrollToCaret()
         }
-        Append-TerminalText "[+] Loaded $($ToolsList.Count) tool script(s). Execution log path: $HistoryFile" ([System.Drawing.Color]::LightGreen)
-    }
+        catch {
+            # Prevent non-critical render exceptions from breaking background tasks
+        }
+    })
 }
-
 function Invoke-SelectedScriptAsync {
     <#
     .SYNOPSIS
@@ -391,20 +393,21 @@ function Invoke-SelectedScriptAsync {
     $Process.StartInfo = $ProcessInfo
     $Process.EnableRaisingEvents = $true
 
-    # Thread-safe Standard Output Event Handler
-    $null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -Action {
-        if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
-            Append-TerminalText $Event.SourceEventArgs.Data ([System.Drawing.Color]::LightGray)
-        }
+   # Standard Output Event Handler
+$null = Register-ObjectEvent -InputObject $Process -EventName "OutputDataReceived" -Action {
+    if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
+        # Explicitly pass text color to avoid default scope binding failures
+        Append-TerminalText -Message $Event.SourceEventArgs.Data -Color ([System.Drawing.Color]::LightGray)
     }
+}
 
-    # Thread-safe Standard Error Event Handler
-    $null = Register-ObjectEvent -InputObject $Process -EventName "ErrorDataReceived" -Action {
-        if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
-            Append-TerminalText $Event.SourceEventArgs.Data ([System.Drawing.Color]::Coral)
-        }
+# Standard Error Event Handler
+$null = Register-ObjectEvent -InputObject $Process -EventName "ErrorDataReceived" -Action {
+    if (-not [string]::IsNullOrWhiteSpace($Event.SourceEventArgs.Data)) {
+        # Explicitly pass error color
+        Append-TerminalText -Message $Event.SourceEventArgs.Data -Color ([System.Drawing.Color]::Coral)
     }
-
+}
     # Asynchronous Process Exit Handler (Re-enables UI controls without blocking thread)
     $null = Register-ObjectEvent -InputObject $Process -EventName "Exited" -Action {
         Append-TerminalText "[+] Tool execution finalized. Process Exit Code: $($Sender.ExitCode)" ([System.Drawing.Color]::LightGreen)
