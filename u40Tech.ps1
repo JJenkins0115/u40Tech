@@ -1,6 +1,6 @@
 # ============================================================
-# Script Name:   U40Tech.ps1
-# Repository:    U40Tech
+# Script Name:   u40Tech.ps1
+# Repository:    JJenkins0115/u40Tech
 # Description:   Integrated Graphical Shell & PowerShell Terminal Host
 # Compatibility: PowerShell 5.1+, VS Code Terminal Host, Windows 10/11
 # ============================================================
@@ -8,10 +8,13 @@
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = "Stop"
 
-# Clear variable scope leaks
+# Force TLS 1.2 for secure GitHub communications on older PowerShell hosts
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Clear residual runspace variables
 Remove-Variable ActiveRunspace, ActivePipeline -ErrorAction SilentlyContinue
 
-# Load GUI assemblies
+# Load GUI Assemblies
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -24,25 +27,31 @@ if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     Write-Host "[>] Requesting elevated process context..." -ForegroundColor Yellow
 
     Start-Process powershell.exe `
-        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" `
+        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm 'https://raw.githubusercontent.com/JJenkins0115/u40Tech/main/u40Tech.ps1' | iex`"" `
         -Verb RunAs
 
     exit
 }
 
 # ------------------------------------------------------------
-# 1. TOOL DISCOVERY ENGINE (HYBRID / IRM SAFE)
+# 1. TOOL DISCOVERY & REMOTE SYNC ENGINE (IRM / LOCAL SAFE)
 # ------------------------------------------------------------
-$ScriptRoot = $null
+
+# Determine execution context (Local vs. IRM Remote Memory)
+$IsLocalScript = $false
+$ScriptRoot    = $null
 
 if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot) -and (Test-Path -Path $PSScriptRoot)) {
-    $ScriptRoot = $PSScriptRoot
+    $ScriptRoot    = $PSScriptRoot
+    $IsLocalScript = $true
 }
-elseif ($MyInvocation.MyCommand.Definition -and (Test-Path -Path $MyInvocation.MyCommand.Definition -ErrorAction SilentlyContinue)) {
-    $ScriptRoot = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
+elseif ($MyInvocation.MyCommand.Path -and (Test-Path -Path $MyInvocation.MyCommand.Path)) {
+    $ScriptRoot    = Split-Path -Parent -Path $MyInvocation.MyCommand.Path
+    $IsLocalScript = $true
 }
-else {
-    # Handles direct 'irm | iex' web invocations cleanly
+
+if (-not $IsLocalScript) {
+    # Executed via IRM / IEX in memory - fallback to local temp workspace
     $ScriptRoot = Join-Path -Path $env:TEMP -ChildPath "U40Tech"
 }
 
@@ -52,12 +61,29 @@ if (-not (Test-Path -Path $ToolsDirectory)) {
     New-Item -ItemType Directory -Path $ToolsDirectory -Force | Out-Null
 }
 
-function Get-RepositoryTools {
-    param([string]$Path)
-    if (Test-Path -Path $Path) {
-        return Get-ChildItem -Path $Path -Filter "*.ps1" -Recurse | Select-Object Name, FullName
+# Function to auto-download repository sub-scripts if launched remotely via IRM
+function Sync-RemoteTools {
+    param(
+        [string]$TargetDir
+    )
+    
+    Write-Host "[>] Remote IRM execution detected. Syncing toolkit scripts from GitHub..." -ForegroundColor Cyan
+
+    $BaseRawUrl = "https://raw.githubusercontent.com/JJenkins0115/u40Tech/main/Tools"
+    $ToolFiles  = @("ChangeName.ps1", "SystemDiagnostics.ps1", "NetFix.ps1")
+
+    foreach ($File in $ToolFiles) {
+        $Destination = Join-Path -Path $TargetDir -ChildPath $File
+        $FileUrl     = "$BaseRawUrl/$File"
+
+        try {
+            Invoke-RestMethod -Uri $FileUrl -OutFile $Destination -ErrorAction Stop
+            Write-Host "    [+] Downloaded: $File" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "    [-] Failed to sync $File from repository." -ForegroundColor Red
+        }
     }
-    return @()
 }
 
 # ------------------------------------------------------------
@@ -227,7 +253,7 @@ function Invoke-SelectedScript {
 }
 
 # ------------------------------------------------------------
-# 4. EVENT BINDINGS
+# 4. EVENT BINDINGS & FORM INITIALIZATION
 # ------------------------------------------------------------
 $RunButton.Add_Click({ Invoke-SelectedScript })
 $ClearButton.Add_Click({ $TerminalOutput.Clear() })
@@ -235,10 +261,15 @@ $ToolListBox.Add_DoubleClick({ Invoke-SelectedScript })
 
 $MainForm.Add_Load({
     Append-TerminalText "[+] U40Tech Host Engine Initialized." ([System.Drawing.Color]::LightGreen)
-    Append-TerminalText "[>] Target Path: $ToolsDirectory" ([System.Drawing.Color]::Gray)
 
-    $ToolsList = Get-RepositoryTools -Path $ToolsDirectory
-    if ($ToolsList.Count -eq 0) {
+    if (-not $IsLocalScript) {
+        Sync-RemoteTools -TargetDir $ToolsDirectory
+    }
+
+    Append-TerminalText "[>] Local Tools Directory: $ToolsDirectory" ([System.Drawing.Color]::Gray)
+
+    $ToolsList = Get-ChildItem -Path $ToolsDirectory -Filter "*.ps1" -ErrorAction SilentlyContinue
+    if (-not $ToolsList -or $ToolsList.Count -eq 0) {
         Append-TerminalText "[!] No .ps1 scripts discovered in 'Tools' directory." ([System.Drawing.Color]::Yellow)
     }
     else {
